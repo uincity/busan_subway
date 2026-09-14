@@ -50,6 +50,43 @@ def top_chart(frame: pd.DataFrame, value_col: str, color: str):
     st.altair_chart((bars + text).properties(height=max(230, len(frame) * 30)))
 
 
+STATION_METRIC_LABELS = {
+    "canonical_station_id": "역 코드",
+    "station_name": "역명",
+    "line_id": "호선",
+    "valid_weekdays": "유효 평일수",
+    "daily_ridership": "평일 일평균 승하차",
+    "AM_board": "출근시간 승차",
+    "AM_alight": "출근시간 하차",
+    "PM_board": "퇴근시간 승차",
+    "PM_alight": "퇴근시간 하차",
+    "am_direction": "출근 방향성 지수",
+    "pm_direction": "퇴근 방향성 지수",
+    "residential_score": "주거 출발형 점수",
+    "employment_score": "업무·통학 도착형 점수",
+    "station_type": "역 유형",
+    "low_sample_flag": "표본 부족 여부",
+}
+
+GROWTH_LABELS = {
+    "direction": "증감 구분", "rank": "순위", "canonical_station_id": "역 코드",
+    "station_name": "역명", "line_id": "호선", "station_type": "역 유형",
+    "baseline_value": "기준 이용량", "target_value": "대상 이용량",
+    "absolute_change": "증감 건수", "change_pct": "증감률(%)",
+    "cagr_pct": "연평균 증감률(%)", "relative_growth_pct": "상대 성장률(%)",
+    "increase_streak": "연속 증가 횟수", "decrease_streak": "연속 감소 횟수",
+    "trend_badge": "추세 상태", "low_base": "저기저 여부",
+    "baseline_days": "기준 관측일수", "target_days": "대상 관측일수",
+    "network_change_pct": "전체 증감률(%)", "exclusion_reason": "제외 사유",
+}
+
+ANNUAL_LABELS = {
+    "year": "연도", "canonical_station_id": "역 코드", "station_name": "역명", "line_id": "호선",
+    "board": "승차", "alight": "하차", "total": "승하차 합계", "observed_days": "관측일수",
+    "expected_days": "기대일수", "coverage_pct": "자료 충족률(%)", "is_complete": "완전연도 여부",
+}
+
+
 metrics, monthly, annual, calendar_monthly, quality_summary = load_data()
 date_min, date_max = quality_summary["date_min"], quality_summary["date_max"]
 tabs = st.tabs(["역세권 지표", "출퇴근 성격", "장기 변화", "뜨는 역 · 지는 역 TOP10", "아파트 연결", "데이터 상태"])
@@ -61,25 +98,56 @@ with tabs[0]:
         st.metric("최근 관측일", str(date_max), border=True)
     rank_col = st.selectbox("순위 기준", ["daily_ridership", "AM_board", "AM_alight", "PM_board", "PM_alight"],
                             format_func={"daily_ridership": "평일 일평균 승하차", "AM_board": "출근 승차", "AM_alight": "출근 하차", "PM_board": "퇴근 승차", "PM_alight": "퇴근 하차"}.get)
-    st.bar_chart(metrics.nlargest(20, rank_col).sort_values(rank_col), x="station_name", y=rank_col, horizontal=True)
-    st.dataframe(metrics.sort_values(rank_col, ascending=False), hide_index=True)
+    top_metrics = metrics.nlargest(20, rank_col).copy()
+    station_chart = alt.Chart(top_metrics).mark_bar(color="#2563EB").encode(
+        x=alt.X(f"{rank_col}:Q", title=f"{STATION_METRIC_LABELS[rank_col]}(건)", axis=alt.Axis(format=",")),
+        y=alt.Y("station_name:N", title="역명", sort=alt.SortField(field=rank_col, order="descending")),
+        tooltip=[
+            alt.Tooltip("station_name:N", title="역명"),
+            alt.Tooltip("line_id:N", title="호선"),
+            alt.Tooltip(f"{rank_col}:Q", title=STATION_METRIC_LABELS[rank_col], format=",.0f"),
+            alt.Tooltip("station_type:N", title="역 유형"),
+            alt.Tooltip("valid_weekdays:Q", title="유효 평일수", format=",.0f"),
+        ],
+    ).properties(height=600)
+    st.altair_chart(station_chart)
+    detail = metrics.sort_values(rank_col, ascending=False).rename(columns=STATION_METRIC_LABELS)
+    st.dataframe(
+        detail,
+        hide_index=True,
+        column_config={
+            "유효 평일수": st.column_config.NumberColumn(format="%,d일"),
+            "평일 일평균 승하차": st.column_config.NumberColumn(format="%,.0f건"),
+            "출근시간 승차": st.column_config.NumberColumn(format="%,.0f건"),
+            "출근시간 하차": st.column_config.NumberColumn(format="%,.0f건"),
+            "퇴근시간 승차": st.column_config.NumberColumn(format="%,.0f건"),
+            "퇴근시간 하차": st.column_config.NumberColumn(format="%,.0f건"),
+            "출근 방향성 지수": st.column_config.NumberColumn(format="%.3f"),
+            "퇴근 방향성 지수": st.column_config.NumberColumn(format="%.3f"),
+            "주거 출발형 점수": st.column_config.NumberColumn(format="%.1f"),
+            "업무·통학 도착형 점수": st.column_config.NumberColumn(format="%.1f"),
+        },
+    )
 
 with tabs[1]:
-    st.scatter_chart(metrics, x="am_direction", y="pm_direction", size="daily_ridership", color="station_type")
+    direction_view = metrics.rename(columns=STATION_METRIC_LABELS)
+    st.scatter_chart(direction_view, x="출근 방향성 지수", y="퇴근 방향성 지수", size="평일 일평균 승하차", color="역 유형")
     st.caption("방향성 지수와 기존 유형 분류는 최신 12개월 평일 자료 기준입니다.")
-    st.dataframe(metrics.sort_values("residential_score", ascending=False), hide_index=True)
+    st.dataframe(direction_view.sort_values("주거 출발형 점수", ascending=False), hide_index=True)
 
 with tabs[2]:
     defaults = metrics.nlargest(3, "daily_ridership").station_name.tolist()
     names = st.multiselect("비교 역(2~5개 권장)", sorted(monthly.station_name.unique()), default=defaults)
-    st.line_chart(monthly[monthly.station_name.isin(names)], x="month", y="daily_ridership", color="station_name")
+    monthly_view = monthly[monthly.station_name.isin(names)].rename(columns={
+        "month": "연월", "daily_ridership": "평일 일평균 승하차", "station_name": "역명"})
+    st.line_chart(monthly_view, x="연월", y="평일 일평균 승하차", color="역명")
 
 with tabs[3]:
     st.subheader("뜨는 역 · 지는 역 TOP10")
     complete = completed_years(annual)
     default_target = max(complete)
     all_targets = complete + ([int(annual.year.max())] if int(annual.year.max()) not in complete else [])
-    mode = st.segmented_control("비교 모드", ["전년 대비", "3년 전 대비", "5년 전 대비", "직접 선택", "동일월 누적(YTD)"], default="전년 대비")
+    mode = st.segmented_control("비교 모드", ["전년 대비", "3년 전 대비", "5년 전 대비", "직접 선택", "동일월 누적"], default="전년 대비")
     cols = st.columns(5)
     with cols[0]: target_year = st.selectbox("대상연도", all_targets, index=all_targets.index(default_target), key="growth_target")
     gap = {"전년 대비": 1, "3년 전 대비": 3, "5년 전 대비": 5}.get(mode)
@@ -88,7 +156,7 @@ with tabs[3]:
             choices = [y for y in complete if y < target_year]
             baseline_year = st.selectbox("기준연도", choices, index=len(choices) - 1, key="growth_base")
         else:
-            baseline_year = target_year - 1 if mode == "동일월 누적(YTD)" else target_year - gap
+            baseline_year = target_year - 1 if mode == "동일월 누적" else target_year - gap
             st.text_input("기준연도", str(baseline_year), disabled=True)
     with cols[2]: metric_label = st.selectbox("승하차 지표", ["승하차 합계", "승차", "하차"])
     with cols[3]: rank_label = st.selectbox("순위 기준", ["증감률", "절대 증감"], key="growth_rank")
@@ -96,7 +164,7 @@ with tabs[3]:
     metric_col = {"승하차 합계": "total", "승차": "board", "하차": "alight"}[metric_label]
     rank_col = {"증감률": "change_pct", "절대 증감": "absolute_change"}[rank_label]
     ytd_month = None
-    if mode == "동일월 누적(YTD)":
+    if mode == "동일월 누적":
         available = calendar_monthly[calendar_monthly.year.eq(target_year)].month_num.max()
         ytd_month = int(available) if pd.notna(available) else None
         st.info(f"동일월 누적 비교: {target_year}년과 {baseline_year}년의 1~{ytd_month}월. 단순 연율화하지 않습니다.")
@@ -139,6 +207,7 @@ with tabs[3]:
     table_cols = ["rank", "station_name", "line_id", "station_type", "baseline_value", "target_value", "absolute_change", "change_pct",
                   "relative_growth_pct", "increase_streak", "decrease_streak", "trend_badge", "low_base"]
     table = pd.concat([rising.assign(direction="증가"), falling.assign(direction="감소")], ignore_index=True)[["direction", *table_cols]]
+    table = table.rename(columns=GROWTH_LABELS)
     st.dataframe(table, hide_index=True, column_config={
         "baseline_value": st.column_config.NumberColumn("기준 이용량(건)", format="%,.0f"),
         "target_value": st.column_config.NumberColumn("대상 이용량(건)", format="%,.0f"),
@@ -147,7 +216,8 @@ with tabs[3]:
         "relative_growth_pct": st.column_config.NumberColumn("상대 성장률", format="%+.1f%%")})
     st.subheader("지도")
     st.info("역 좌표와 행정구역 마스터가 확보되지 않아 지도 및 부산시내/시외·구군 필터는 비활성화했습니다. 좌표가 없는 역도 순위표에는 유지됩니다.")
-    with st.expander(f"비교 제외 {len(excluded)}개 역과 사유"): st.dataframe(excluded, hide_index=True)
+    with st.expander(f"비교 제외 {len(excluded)}개 역과 사유"):
+        st.dataframe(excluded.rename(columns=GROWTH_LABELS), hide_index=True)
     metadata = {"baseline_year": baseline_year, "target_year": target_year, "metric": metric_col, "rank_by": rank_col,
                 "ytd_month": ytd_month, "formula_version": FORMULA_VERSION, "data_through": str(date_max),
                 "filters": {"lines": selected_lines, "types": selected_types, "minimum_baseline": min_base, "search": search}}
@@ -161,20 +231,24 @@ with tabs[3]:
     st.subheader("선택역 연간 추세")
     selected = st.multiselect("추세 비교 역(2~5개)", sorted(annual.station_name.unique()), default=rising.station_name.head(2).tolist(), key="annual_trend_stations")
     annual_trend = annual[annual.station_name.isin(selected) & annual.is_complete]
-    st.line_chart(annual_trend, x="year", y=metric_col, color="station_name")
+    metric_korean = ANNUAL_LABELS[metric_col]
+    annual_trend_view = annual_trend.rename(columns={"year": "연도", metric_col: metric_korean, "station_name": "역명"})
+    st.line_chart(annual_trend_view, x="연도", y=metric_korean, color="역명")
     common = annual_trend.pivot(index="year", columns="station_name", values=metric_col).dropna()
     positive = common[(common > 0).all(axis=1)]
     if not positive.empty:
         index_year = int(positive.index.min())
-        indexed = common.div(common.loc[index_year]).mul(100).reset_index().melt("year", var_name="station_name", value_name="index")
+        indexed = common.div(common.loc[index_year]).mul(100).reset_index().melt("year", var_name="station_name", value_name="index").rename(
+            columns={"year": "연도", "station_name": "역명", "index": "기준연도 대비 지수"})
         st.caption(f"공통 양수 기준연도 {index_year}=100 지수")
-        st.line_chart(indexed, x="year", y="index", color="station_name")
+        st.line_chart(indexed, x="연도", y="기준연도 대비 지수", color="역명")
     st.subheader("연도별 TOP 기록")
     record_choices = [y for y in complete if y - 1 in complete]
     record_year = st.selectbox("전년 대비 기록 연도", record_choices, index=len(record_choices) - 1)
     record, _ = compare_periods(annual, calendar_monthly, ComparisonSpec(record_year - 1, record_year, metric_col))
     record_up, record_down = rank_changes(record, rank_col, top_n)
-    st.dataframe(pd.concat([record_up.assign(direction="증가"), record_down.assign(direction="감소")]), hide_index=True)
+    record_table = pd.concat([record_up.assign(direction="증가"), record_down.assign(direction="감소")]).rename(columns=GROWTH_LABELS)
+    st.dataframe(record_table, hide_index=True)
     st.caption(f"{record_year - 1}~{record_year} 비교 가능 표본 {len(record)}개. 선택한 지표·순위 기준·TOP 개수를 적용했습니다.")
 
 with tabs[4]:
@@ -183,6 +257,11 @@ with tabs[4]:
     st.download_button("입력 템플릿 다운로드", template.to_csv(index=False).encode("utf-8-sig"), "apartment_template.csv", "text/csv")
 
 with tabs[5]:
-    st.subheader("품질 요약"); st.dataframe(pd.read_csv(REPORTS / "quality_summary.csv"), hide_index=True)
-    st.subheader("원본 파일 매니페스트"); st.dataframe(pd.read_csv(REPORTS / "raw_file_manifest.csv"), hide_index=True)
+    quality_labels = {"metric": "품질 항목", "value": "값"}
+    manifest_labels = {"source_file_id": "원본 파일 ID", "file_name": "파일명", "relative_path": "상대 경로",
+        "sha256": "SHA-256", "bytes": "파일 크기(바이트)", "encoding": "문자 인코딩", "rows": "행 수",
+        "date_min": "최초 일자", "date_max": "최종 일자", "column_count": "열 수", "read_status": "읽기 상태",
+        "is_exact_duplicate": "완전 중복 여부"}
+    st.subheader("품질 요약"); st.dataframe(pd.read_csv(REPORTS / "quality_summary.csv").rename(columns=quality_labels), hide_index=True)
+    st.subheader("원본 파일 목록"); st.dataframe(pd.read_csv(REPORTS / "raw_file_manifest.csv").rename(columns=manifest_labels), hide_index=True)
     st.caption(f"원자료 관측 범위: {date_min} ~ {date_max}")
