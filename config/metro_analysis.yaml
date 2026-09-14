@@ -1,0 +1,12 @@
+operator: 부산교통공사
+morning_start: 7
+morning_end: 9
+evening_start: 18
+evening_end: 20
+classification_threshold: 0.15
+sensitivity_thresholds: [0.10, 0.15, 0.20]
+minimum_valid_weekdays: 40
+minimum_daily_peak_count: 200
+default_recent_months: 12
+official_coverage_end: 2026-07-31
+

@@ -1,0 +1,6 @@
+﻿metric,value
+normalized_rows,24327408
+invalid_rows,0
+overlapping_rows_before_dedup,96
+date_min,2014-01-01
+date_max,2026-07-31

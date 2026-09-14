@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.tmp/
+pytest-cache-files-*/
+*.pyc
+data/**/*.csv
+data/interim/metro/*.parquet
+data/processed/metro/*.parquet
