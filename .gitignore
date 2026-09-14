@@ -5,5 +5,3 @@ __pycache__/
 pytest-cache-files-*/
 *.pyc
 data/**/*.csv
-data/interim/metro/*.parquet
-data/processed/metro/*.parquet

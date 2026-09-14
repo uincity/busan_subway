@@ -6,6 +6,7 @@ from pathlib import Path
 
 import altair as alt
 import pandas as pd
+import pydeck as pdk
 import streamlit as st
 
 ROOT = Path(__file__).resolve().parent
@@ -24,10 +25,11 @@ def load_data():
     if not all((PROCESSED / name).exists() for name in needed):
         run_all()
     quality = pd.read_csv(REPORTS / "quality_summary.csv").set_index("metric")["value"]
+    coordinates = pd.read_csv(ROOT / "config" / "station_coordinates.csv", dtype={"canonical_station_id": str})
     return (pd.read_parquet(PROCESSED / "station_metrics.parquet"),
             pd.read_parquet(PROCESSED / "station_monthly.parquet"),
             pd.read_parquet(PROCESSED / "station_annual.parquet"),
-            pd.read_parquet(PROCESSED / "station_calendar_monthly.parquet"), quality)
+            pd.read_parquet(PROCESSED / "station_calendar_monthly.parquet"), coordinates, quality)
 
 
 def csv_bytes(frame: pd.DataFrame, metadata: dict) -> bytes:
@@ -86,8 +88,17 @@ ANNUAL_LABELS = {
     "expected_days": "기대일수", "coverage_pct": "자료 충족률(%)", "is_complete": "완전연도 여부",
 }
 
+STATION_TYPE_COLORS = {
+    "주거 출발형 추정": [37, 99, 235, 190],
+    "업무·통학 도착형 추정": [249, 115, 22, 190],
+    "방향 균형형": [16, 185, 129, 190],
+    "혼합형": [139, 92, 246, 190],
+    "자료부족/판정보류": [107, 114, 128, 190],
+}
+STATION_TYPE_HEX = {name: f"#{rgba[0]:02x}{rgba[1]:02x}{rgba[2]:02x}" for name, rgba in STATION_TYPE_COLORS.items()}
 
-metrics, monthly, annual, calendar_monthly, quality_summary = load_data()
+
+metrics, monthly, annual, calendar_monthly, coordinates, quality_summary = load_data()
 date_min, date_max = quality_summary["date_min"], quality_summary["date_max"]
 tabs = st.tabs(["역세권 지표", "출퇴근 성격", "장기 변화", "뜨는 역 · 지는 역 TOP10", "아파트 연결", "데이터 상태"])
 
@@ -131,7 +142,47 @@ with tabs[0]:
 
 with tabs[1]:
     direction_view = metrics.rename(columns=STATION_METRIC_LABELS)
-    st.scatter_chart(direction_view, x="출근 방향성 지수", y="퇴근 방향성 지수", size="평일 일평균 승하차", color="역 유형")
+    mapped = metrics.merge(coordinates, on="canonical_station_id", how="left", validate="one_to_one")
+    mapped = mapped.dropna(subset=["latitude", "longitude"]).copy()
+    mapped["marker_color"] = mapped.station_type.map(STATION_TYPE_COLORS).apply(
+        lambda value: value if isinstance(value, list) else [107, 114, 128, 190])
+    max_ridership = mapped.daily_ridership.max()
+    mapped["marker_radius"] = (mapped.daily_ridership / max_ridership).pow(.5).mul(650)
+    mapped["daily_ridership_display"] = mapped.daily_ridership.map(lambda value: f"{value:,.0f}건")
+    mapped["am_direction_display"] = mapped.am_direction.map(lambda value: f"{value:.3f}")
+    mapped["pm_direction_display"] = mapped.pm_direction.map(lambda value: f"{value:.3f}")
+    st.subheader("역 유형과 평일 평균 승하차량 지도")
+    st.pydeck_chart(pdk.Deck(
+        map_style=None,
+        initial_view_state=pdk.ViewState(
+            latitude=float(mapped.latitude.mean()), longitude=float(mapped.longitude.mean()), zoom=10.1, pitch=0),
+        layers=[pdk.Layer(
+            "ScatterplotLayer", mapped, id="station-demand-map", pickable=True, stroked=True,
+            get_position="[longitude, latitude]", get_fill_color="marker_color", get_line_color=[255, 255, 255, 210],
+            get_radius="marker_radius", radius_min_pixels=4, radius_max_pixels=34, line_width_min_pixels=1)],
+        tooltip={"html": "<b>{station_name}</b><br/>호선: {line_id}호선<br/>역 유형: {station_type}<br/>평일 평균 승하차: {daily_ridership_display}<br/>출근 방향성 지수: {am_direction_display}<br/>퇴근 방향성 지수: {pm_direction_display}",
+                 "style": {"backgroundColor": "#111827", "color": "white"}},
+    ), height=620)
+    legend = pd.DataFrame({"역 유형": list(STATION_TYPE_HEX), "색상": list(STATION_TYPE_HEX.values())})
+    st.caption("마커의 원 면적은 평일 평균 승하차량에 비례하며, 화면상 최소·최대 크기를 제한했습니다.")
+    legend_chart = alt.Chart(legend).mark_circle(size=170).encode(
+        y=alt.Y("역 유형:N", title=None, axis=alt.Axis(labelLimit=220)),
+        color=alt.Color("색상:N", scale=None, legend=None),
+    ).properties(width=260, height=150)
+    st.altair_chart(legend_chart, width="content")
+
+    color_domain = list(STATION_TYPE_COLORS)
+    color_range = [STATION_TYPE_HEX[name] for name in color_domain]
+    direction_chart = alt.Chart(direction_view).mark_circle(opacity=.72, stroke="white", strokeWidth=.6).encode(
+        x=alt.X("출근 방향성 지수:Q", scale=alt.Scale(domain=[-1, 1])),
+        y=alt.Y("퇴근 방향성 지수:Q", scale=alt.Scale(domain=[-1, 1])),
+        size=alt.Size("평일 일평균 승하차:Q", scale=alt.Scale(range=[35, 1200]), legend=None),
+        color=alt.Color("역 유형:N", scale=alt.Scale(domain=color_domain, range=color_range)),
+        tooltip=[alt.Tooltip("역명:N"), alt.Tooltip("호선:N"), alt.Tooltip("역 유형:N"),
+                 alt.Tooltip("평일 일평균 승하차:Q", format=",.0f"),
+                 alt.Tooltip("출근 방향성 지수:Q", format=".3f"), alt.Tooltip("퇴근 방향성 지수:Q", format=".3f")],
+    ).properties(height=520)
+    st.altair_chart(direction_chart)
     st.caption("방향성 지수와 기존 유형 분류는 최신 12개월 평일 자료 기준입니다.")
     st.dataframe(direction_view.sort_values("주거 출발형 점수", ascending=False), hide_index=True)
 

@@ -11,6 +11,13 @@ def test_dashboard_loads_without_exception():
     assert app.title[0].value == "부산 도시철도 역세권 수요 탐색"
     assert len(app.tabs) == 6
     assert any(tab.label == "뜨는 역 · 지는 역 TOP10" for tab in app.tabs)
+    assert len(app.get("deck_gl_json_chart")) == 1
+    map_spec = json.loads(app.get("deck_gl_json_chart")[0].proto.json)
+    map_layer = map_spec["layers"][0]
+    assert map_layer["@@type"] == "ScatterplotLayer"
+    assert len(map_layer["data"]) == 112
+    assert map_layer["getFillColor"] == "@@=marker_color"
+    assert map_layer["getRadius"] == "@@=marker_radius"
 
     station_table = app.dataframe[0].value
     assert list(station_table.columns) == [

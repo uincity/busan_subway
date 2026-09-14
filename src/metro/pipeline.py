@@ -54,6 +54,8 @@ def _hour_column(name: str) -> tuple[int, int] | None:
 def inspect_files() -> pd.DataFrame:
     rows = []
     for path in sorted(RAW.rglob("*.csv")):
+        if INTERIM in path.parents or PROCESSED in path.parents:
+            continue
         df, enc = read_csv_flexible(path)
         date_col = next((c for c in df.columns if c.strip() == "년월일"), None)
         dates = pd.to_datetime(df[date_col].astype(str).str.strip(), errors="coerce") if date_col else pd.Series(dtype="datetime64[ns]")
@@ -264,6 +266,9 @@ def write_source_reports(inventory: pd.DataFrame) -> None:
         "access_method": "CSV 직접 다운로드", "published_coverage": "기준일 2021-02-26", "local_coverage": "미확보", "time_resolution": "기준일 스냅샷",
         "line_scope": "역사", "aggregation": "역사 속성", "encoding": "미확인", "update_cycle": "비정기", "license": "공식 페이지 참조", "access_verified": "페이지 확인; 파일 미확보"
     }])
+    station_info = source.official_url.str.contains("15043686", na=False)
+    source.loc[station_info, ["local_coverage", "encoding", "license", "access_verified"]] = [
+        "114개 역 전수 확보", "UTF-16 LE", "이용허락범위 제한 없음", "공식 CSV 다운로드 및 역 코드 114개 전수 매칭"]
     source.to_csv(REPORTS / "source_inventory.csv", index=False, encoding="utf-8-sig")
     local_max = pd.to_datetime(inventory.date_max).max()
     official_max = pd.Timestamp("2026-07-31")
@@ -278,6 +283,7 @@ def write_source_reports(inventory: pd.DataFrame) -> None:
 - 동일 SHA 파일은 1회만 처리하고, 부분 재게시본의 겹치는 관측은 `일자×역코드×승하차×시간대` 키로 제거한다.
 - 환승역은 게이트 집계 단위를 보존한다. 수영역처럼 통합 게이트인 경우 임의로 호선별 배분하지 않는다.
 """
+    md += "\n- 역사 위경도는 공식 역사정보 CSV의 114개 역을 역 코드로 전수 매칭했으며 기준일은 2021-02-26이다.\n"
     (REPORTS / "coverage_report.md").write_text(md, encoding="utf-8")
 
 

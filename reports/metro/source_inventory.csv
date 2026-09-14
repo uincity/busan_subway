@@ -1,3 +1,3 @@
 ﻿provider,dataset,official_url,access_method,published_coverage,local_coverage,time_resolution,line_scope,aggregation,encoding,update_cycle,license,access_verified
 부산교통공사,시간대별 승하차인원,https://www.data.go.kr/data/3057229/fileData.do,CSV 직접 다운로드 또는 활용신청 후 API,2026-01~2026-07,2014-01-01~2026-07-31,일×역×승하차×1시간,부산교통공사 1~4호선,개찰구 승하차 연인원,"cp949, utf-8-sig",월간,이용허락범위 제한 없음,공식 페이지 확인; 최신 파일은 로컬 미확보
-부산교통공사,도시철도역사정보,https://www.data.go.kr/data/15043686/fileData.do,CSV 직접 다운로드,기준일 2021-02-26,미확보,기준일 스냅샷,역사,역사 속성,미확인,비정기,공식 페이지 참조,페이지 확인; 파일 미확보
+부산교통공사,도시철도역사정보,https://www.data.go.kr/data/15043686/fileData.do,CSV 직접 다운로드,기준일 2021-02-26,114개 역 전수 확보,기준일 스냅샷,역사,역사 속성,UTF-16 LE,비정기,이용허락범위 제한 없음,공식 CSV 다운로드 및 역 코드 114개 전수 매칭

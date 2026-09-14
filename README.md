@@ -24,6 +24,7 @@ python -m venv .venv
 ## 주요 기능
 
 - 역별 평일 승하차 및 출퇴근 방향성 분류
+- 부산교통공사 공식 역사 위경도에 기반한 역 유형·수요 지도
 - 역명 변경을 역 코드 기준으로 연결
 - 연간 승차·하차·합계와 관측 완전성 검증
 - 전년·3년·5년·직접 선택 및 동일월 누적(YTD) 비교
@@ -48,6 +49,8 @@ python -m venv .venv
 - `data/processed/metro/station_name_master.csv`: 표준 역명과 원본 명칭 이력
 
 원본 CSV와 생성된 Parquet는 용량과 중복 관리를 위해 Git에서 제외됩니다. 데이터 파일을 로컬 `data/`에 준비한 후 파이프라인을 실행하세요.
+
+역 좌표는 공공데이터포털의 [부산교통공사 도시철도역사정보](https://www.data.go.kr/data/15043686/fileData.do)(기준일 2021-02-26)에서 수집했으며, `config/station_coordinates.csv`에 역 코드 기준으로 보관합니다.
 
 ## 테스트
 
