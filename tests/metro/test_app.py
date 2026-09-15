@@ -11,7 +11,7 @@ def test_dashboard_loads_without_exception():
     assert app.title[0].value == "부산 도시철도 역세권 수요 탐색"
     assert len(app.tabs) == 6
     assert any(tab.label == "뜨는 역 · 지는 역 TOP10" for tab in app.tabs)
-    assert len(app.file_uploader) == 1  # 기존 사건 CSV 업로드만 표시; 아파트는 로컬 Parquet 자동 로드
+    assert len(app.file_uploader) == 2  # 사건 CSV와 출입구 CSV 가져오기; 아파트는 로컬 Parquet 자동 로드
     assert len(app.get("deck_gl_json_chart")) == 2
     map_spec = json.loads(app.get("deck_gl_json_chart")[0].proto.json)
     map_layer = map_spec["layers"][0]

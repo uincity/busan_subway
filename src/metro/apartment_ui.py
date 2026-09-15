@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -11,8 +12,15 @@ import streamlit as st
 import yaml
 
 from .apartments import (
-    ApartmentDataError, build_station_links, bytes_sha256, file_sha256,
+    ApartmentDataError, bytes_sha256, file_sha256,
     read_apartment_parquet, resolve_apartment_path, validate_apartments,
+)
+from .entrances import (
+    ACCESS_STATUSES, ENTRANCE_COLUMNS, ENTRANCE_TYPES, SOURCE_TYPES,
+    VERIFICATION_STATUSES, EntranceConflictError, EntranceDataError,
+    build_effective_station_links, empty_entrances, entrance_revision,
+    merge_import, new_entrance_id, parse_entrance_csv, read_entrances,
+    save_entrances_atomic, utc_now_text, validate_candidate,
 )
 
 
@@ -29,9 +37,11 @@ def _load_upload(content: bytes, signature: str, stations: pd.DataFrame):
 
 
 @st.cache_data(max_entries=8, show_spinner="역–아파트 직선거리를 계산하는 중입니다.")
-def _links(apartments: pd.DataFrame, stations: pd.DataFrame, signature: str) -> pd.DataFrame:
-    del signature
-    return build_station_links(apartments, stations)
+def _links(apartments: pd.DataFrame, stations: pd.DataFrame, entrances: pd.DataFrame,
+           signature: str, entrance_signature: str, mode: str, include_restricted: bool) -> pd.DataFrame:
+    del signature, entrance_signature
+    return build_effective_station_links(apartments, stations, entrances, mode=mode,
+                                         include_restricted=include_restricted)
 
 
 def _circle_polygon(latitude: float, longitude: float, radius_m: float, points: int = 96) -> dict:
@@ -75,18 +85,183 @@ def _display_table(frame: pd.DataFrame) -> pd.DataFrame:
     out["age_display"] = out.get("apartment_age", pd.Series(index=out.index, dtype="Float64")).map(
         lambda x: "정보 없음" if pd.isna(x) else f"{int(x)}년 (원본 기준시점)"
     )
+    out["corrected"] = out.coordinate_basis.eq("보행 출입구")
     return out.rename(columns={
-        "complex_name": "단지명", "distance_m": "역까지 직선거리(m)", "households": "세대수",
+        "complex_name": "단지명", "effective_distance_m": "적용 거리(m)", "coordinate_basis": "좌표 기준",
+        "center_distance_m": "중심점 거리(m)", "selected_entrance_name": "적용 출입구",
+        "selected_access_status": "출입구 접근 조건", "selected_verified_at": "확인일", "corrected": "출입구 보정 여부",
+        "households": "세대수",
         "buildings": "동수", "approval_date": "사용승인일", "age_display": "연식 및 기준",
         "parking_per_household": "세대당 주차대수", "sigungu": "구", "dong": "동",
         "road_address": "도로명주소",
-    })[["단지명", "역까지 직선거리(m)", "세대수", "동수", "사용승인일", "연식 및 기준",
-         "세대당 주차대수", "구", "동", "도로명주소"]]
+    })[["단지명", "적용 거리(m)", "좌표 기준", "중심점 거리(m)", "적용 출입구", "출입구 접근 조건", "확인일",
+         "출입구 보정 여부", "세대수", "동수", "사용승인일", "연식 및 기준", "세대당 주차대수", "구", "동", "도로명주소"]]
 
 
 def _csv_bytes(frame: pd.DataFrame, metadata: dict) -> bytes:
     header = "# " + json.dumps(metadata, ensure_ascii=False) + "\n"
     return (header + frame.to_csv(index=False)).encode("utf-8-sig")
+
+
+def _entrance_csv_bytes(frame: pd.DataFrame) -> bytes:
+    return frame[ENTRANCE_COLUMNS].to_csv(index=False).encode("utf-8-sig")
+
+
+def _persist_entrances(frame: pd.DataFrame, path: Path) -> bool:
+    try:
+        revision = save_entrances_atomic(frame, path, st.session_state.get("entrance_revision"))
+    except (EntranceDataError, EntranceConflictError, OSError) as exc:
+        st.error(f"출입구를 저장하지 못했습니다: {exc}")
+        return False
+    st.session_state["entrance_revision"] = revision
+    st.session_state["entrances"] = frame
+    _links.clear()
+    st.success("출입구 보정 파일에 저장했습니다. 이전 버전은 .bak 파일로 보관됩니다.")
+    return True
+
+
+def _render_edit_map(home: pd.Series, gates: pd.DataFrame, station: pd.Series, radius: int) -> None:
+    try:
+        import folium
+        from streamlit_folium import st_folium
+    except ImportError:
+        st.warning("편집 지도 클릭 구성요소가 없어 직접 좌표 입력만 사용할 수 있습니다.")
+        return
+    center = [float(home.latitude), float(home.longitude)]
+    m = folium.Map(location=center, zoom_start=17, control_scale=True)
+    folium.Marker(center, tooltip="원본 단지 중심(수정 불가)", icon=folium.Icon(color="blue", icon="home")).add_to(m)
+    folium.Marker([float(station.latitude), float(station.longitude)], tooltip=f"{station.station_name}역",
+                  icon=folium.Icon(color="green", icon="train", prefix="fa")).add_to(m)
+    folium.Circle([float(station.latitude), float(station.longitude)], radius=radius, color="#10b981",
+                  fill=True, fill_opacity=.06, tooltip=f"{radius:,}m 반경").add_to(m)
+    for _, gate in gates.iterrows():
+        color = "orange" if bool(gate.enabled) else "gray"
+        folium.CircleMarker([gate.latitude, gate.longitude], radius=8, color=color, fill=True,
+                            tooltip=f"{gate.entrance_name} · {gate.access_status}").add_to(m)
+    clicked = st_folium(m, height=430, width="100%", key=f"entrance_map_{home.kapt_code}",
+                        returned_objects=["last_clicked"])
+    point = clicked.get("last_clicked") if clicked else None
+    if point:
+        st.session_state["entrance_draft_lat"] = float(point["lat"])
+        st.session_state["entrance_draft_lon"] = float(point["lng"])
+        st.caption(f"지도에서 임시 좌표를 지정했습니다: {point['lat']:.7f}, {point['lng']:.7f} — 저장 전에는 영구 반영되지 않습니다.")
+
+
+def _render_entrance_editor(apartments: pd.DataFrame, entrances: pd.DataFrame, path: Path,
+                            station: pd.Series, radius: int, far_warning_m: float = 1000) -> pd.DataFrame:
+    st.divider()
+    st.subheader("출입구 보정")
+    st.caption("전체 유효 단지를 단지명 또는 kapt_code로 검색합니다. 원본 중심 좌표는 변경하지 않습니다.")
+    searchable = apartments[apartments.is_valid_for_linkage].copy()
+    query = st.text_input("단지 검색", placeholder="단지명 또는 kapt_code", key="entrance_search")
+    if query:
+        mask = searchable.complex_name.astype(str).str.contains(query, case=False, na=False, regex=False) | searchable.kapt_code.astype(str).str.contains(query, case=False, na=False, regex=False)
+        searchable = searchable[mask]
+    options = searchable.kapt_code.astype(str).tolist()
+    if not options:
+        st.info("검색 결과가 없습니다.")
+        return entrances
+    names = searchable.set_index(searchable.kapt_code.astype(str)).apply(lambda r: f"{r.complex_name} · {r.kapt_code}", axis=1).to_dict()
+    code = st.selectbox("보정할 단지", options, format_func=names.get, key="entrance_complex")
+    home = searchable[searchable.kapt_code.astype(str).eq(code)].iloc[0]
+    gates = entrances[entrances.kapt_code.astype(str).eq(code)].copy()
+    st.caption("파란 마커는 수정 불가 원본 중심, 주황/회색 원은 등록 출입구(활성/비활성), 초록 마커와 원은 선택 역 및 반경입니다.")
+    _render_edit_map(home, gates, station, radius)
+    if st.button("원본 중심 좌표로 입력값 이동", key="entrance_center", icon=":material/my_location:"):
+        st.session_state["entrance_draft_lat"] = float(home.latitude)
+        st.session_state["entrance_draft_lon"] = float(home.longitude)
+
+    gate_ids = ["새 출입구"] + gates.entrance_id.astype(str).tolist()
+    gate_names = {"새 출입구": "새 출입구"} | gates.set_index("entrance_id").entrance_name.to_dict()
+    chosen_id = st.selectbox("출입구 선택", gate_ids, format_func=gate_names.get, key="entrance_id_choice")
+    existing = None if chosen_id == "새 출입구" else gates[gates.entrance_id.eq(chosen_id)].iloc[0]
+    draft_key = (code, chosen_id)
+    if st.session_state.get("entrance_loaded_key") != draft_key:
+        st.session_state["entrance_loaded_key"] = draft_key
+        st.session_state["entrance_draft_lat"] = float(home.latitude if existing is None else existing.latitude)
+        st.session_state["entrance_draft_lon"] = float(home.longitude if existing is None else existing.longitude)
+    defaults = existing if existing is not None else {}
+    with st.form("entrance_form"):
+        name = st.text_input("출입구 이름", value=str(defaults.get("entrance_name", "")))
+        c1, c2 = st.columns(2)
+        with c1: lat = st.number_input("위도", format="%.7f", key="entrance_draft_lat")
+        with c2: lon = st.number_input("경도", format="%.7f", key="entrance_draft_lon")
+        c1, c2 = st.columns(2)
+        with c1:
+            entrance_type = st.selectbox("출입구 유형", ENTRANCE_TYPES, index=ENTRANCE_TYPES.index(defaults.get("entrance_type", "미확인")))
+            verification = st.selectbox("확인 상태", VERIFICATION_STATUSES, index=VERIFICATION_STATUSES.index(defaults.get("verification_status", "미확인")))
+            enabled = st.checkbox("계산 사용", value=bool(defaults.get("enabled", False)))
+        with c2:
+            access = st.selectbox("접근 상태", ACCESS_STATUSES, index=ACCESS_STATUSES.index(defaults.get("access_status", "미확인")))
+            source = st.selectbox("확인 출처", SOURCE_TYPES, index=SOURCE_TYPES.index(defaults.get("source_type", "기타")))
+            verified_at = st.date_input("확인일", value=pd.to_datetime(defaults.get("verified_at"), errors="coerce").date() if pd.notna(pd.to_datetime(defaults.get("verified_at"), errors="coerce")) else None)
+        access_note = st.text_input("접근 조건 메모", value=str(defaults.get("access_note", "")))
+        source_reference = st.text_input("참고 URL 또는 확인 내용", value=str(defaults.get("source_reference", "")))
+        notes = st.text_area("메모", value=str(defaults.get("notes", "")))
+        submitted = st.form_submit_button("변경 미리보기", type="primary")
+    if submitted:
+        now = utc_now_text()
+        candidate = {
+            "entrance_id": new_entrance_id() if existing is None else existing.entrance_id, "kapt_code": code,
+            "entrance_name": name.strip(), "latitude": lat, "longitude": lon, "entrance_type": entrance_type,
+            "access_status": access, "access_note": access_note, "verification_status": verification,
+            "enabled": enabled, "source_type": source, "source_reference": source_reference,
+            "verified_at": verified_at.isoformat() if verified_at else "",
+            "created_at": now if existing is None else existing.created_at, "updated_at": now, "notes": notes,
+        }
+        check = validate_candidate(candidate, apartments, entrances, far_warning_m=far_warning_m)
+        if not name.strip(): check["errors"].append("출입구 이름을 입력해 주세요.")
+        st.session_state["entrance_preview"] = (candidate, check)
+    preview = st.session_state.get("entrance_preview")
+    if preview and preview[0]["kapt_code"] == code:
+        candidate, check = preview
+        for message in check["warnings"]: st.warning(message)
+        for message in check["errors"]: st.error(message)
+        center_to_gate = check["center_distance_m"]
+        center_station = float(build_effective_station_links(pd.DataFrame([home]), pd.DataFrame([station]), empty_entrances()).iloc[0].center_distance_m)
+        candidate_frame = pd.concat([entrances[~entrances.entrance_id.eq(candidate["entrance_id"])], pd.DataFrame([candidate])], ignore_index=True)
+        preview_link = build_effective_station_links(pd.DataFrame([home]), pd.DataFrame([station]), candidate_frame).iloc[0]
+        st.dataframe(pd.DataFrame([{
+            "중심점→출입구(m)": center_to_gate, "중심점 기준 역거리(m)": center_station,
+            "출입구 적용 후 역거리(m)": preview_link.effective_distance_m,
+            "거리 차이(m)": preview_link.effective_distance_m - center_station,
+            "현재 반경 포함 변화": f"{center_station <= radius} → {preview_link.effective_distance_m <= radius}",
+            "적용 출입구": preview_link.selected_entrance_name or "단지 중심", "접근 조건": preview_link.selected_access_status or "-",
+        }]), hide_index=True)
+        st.caption("모든 거리는 역 대표 좌표까지의 WGS84 직선거리입니다. 단지 경계·실제 보행 경로를 검증한 결과가 아닙니다.")
+        with st.container(horizontal=True):
+            if st.button("저장", disabled=bool(check["errors"]), type="primary", key="entrance_save"):
+                if _persist_entrances(candidate_frame, path):
+                    st.session_state.pop("entrance_preview", None); st.rerun()
+            if st.button("취소", key="entrance_cancel"):
+                st.session_state.pop("entrance_preview", None); st.rerun()
+    if existing is not None:
+        confirm = st.checkbox("삭제 확인: 이 출입구를 삭제합니다", key="entrance_delete_confirm")
+        if st.button("출입구 삭제", disabled=not confirm, key="entrance_delete", icon=":material/delete:"):
+            updated = entrances[~entrances.entrance_id.eq(existing.entrance_id)].copy()
+            if _persist_entrances(updated, path): st.rerun()
+
+    st.markdown("#### 등록 출입구")
+    if gates.empty: st.info("이 단지에 등록된 출입구가 없습니다.")
+    else:
+        shown = gates.copy(); shown["계산 포함(기본)"] = shown.enabled & shown.verification_status.eq("사용자 확인") & shown.entrance_type.isin(["보행 전용", "보행·차량 겸용"]) & shown.access_status.eq("상시 통행")
+        st.dataframe(shown[["entrance_name", "latitude", "longitude", "entrance_type", "access_status", "verification_status", "enabled", "계산 포함(기본)"]], hide_index=True)
+
+    st.markdown("#### CSV 가져오기·내보내기")
+    st.download_button("출입구 전체 CSV", _entrance_csv_bytes(entrances), "apartment_entrances.csv", "text/csv")
+    uploaded = st.file_uploader("출입구 CSV 가져오기", type=["csv"], key="entrance_csv")
+    if uploaded is not None:
+        try:
+            incoming = parse_entrance_csv(uploaded.getvalue())
+            missing_codes = sorted(set(incoming.kapt_code) - set(apartments.kapt_code.astype(str)))
+            if missing_codes: st.warning(f"현재 마스터에 없는 kapt_code {len(missing_codes)}개는 미연결 상태로 보존됩니다.")
+            action = st.segmented_control("중복 ID 처리", ["새 ID만 추가", "동일 ID 업데이트"], default="새 ID만 추가")
+            merged, changes = merge_import(entrances, incoming, action)
+            st.dataframe(changes[["change", "entrance_id", "kapt_code", "entrance_name", "latitude", "longitude"]], hide_index=True)
+            if st.button("미리보기 내용 가져오기", key="entrance_import_apply"):
+                if _persist_entrances(merged, path): st.rerun()
+        except EntranceDataError as exc: st.error(f"가져오기 검증 실패: {exc}")
+    return st.session_state.get("entrances", entrances)
 
 
 def render_apartment_tab(*, root: Path, metrics: pd.DataFrame, coordinates: pd.DataFrame,
@@ -121,7 +296,17 @@ def render_apartment_tab(*, root: Path, metrics: pd.DataFrame, coordinates: pd.D
         return
     st.success(f"아파트 자료 자동 로드 완료: {len(bundle.apartments):,}개 단지")
     st.caption(f"사용 중인 자료: {source_label}")
-    links = _links(bundle.apartments, stations, signature)
+    entrance_path = root / "data" / "corrections" / "apartment_entrances.csv"
+    disk_revision = entrance_revision(entrance_path)
+    if st.session_state.get("entrance_revision") != disk_revision or "entrances" not in st.session_state:
+        try:
+            entrance_data, disk_revision = read_entrances(entrance_path)
+        except (EntranceDataError, OSError) as exc:
+            st.error(f"출입구 보정 파일을 읽을 수 없습니다: {exc}")
+            entrance_data, disk_revision = empty_entrances(), entrance_revision(entrance_path)
+        st.session_state["entrances"] = entrance_data
+        st.session_state["entrance_revision"] = disk_revision
+    entrances = st.session_state["entrances"]
 
     segment_labels = list(config.get("segments", {"전체 역": []}))
     f1, f2, f3 = st.columns(3)
@@ -149,7 +334,7 @@ def render_apartment_tab(*, root: Path, metrics: pd.DataFrame, coordinates: pd.D
     included_names = candidates.station_name.tolist()
     st.caption(f"{segment_note} 포함 역({len(included_names)}개): " + ", ".join(included_names))
 
-    g1, g2, g3 = st.columns(3)
+    g1, g2, g3, g4 = st.columns(4)
     with g1:
         radius = st.segmented_control("반경", [300, 500, 800, 1000], default=300,
                                       format_func=lambda x: f"{x:,}m", key="apt_radius")
@@ -159,6 +344,11 @@ def render_apartment_tab(*, root: Path, metrics: pd.DataFrame, coordinates: pd.D
         minimum_households = st.number_input("직접 입력 세대수", min_value=0, value=500, step=50,
                                              disabled=household_mode != "직접 입력", key="apt_household_custom")
     minimum_households = {"500": 500, "1,000": 1000}.get(household_mode, int(minimum_households))
+    with g4:
+        basis_label = st.segmented_control("거리 기준", ["보정 좌표 우선", "원본 중심 좌표만"], default="보정 좌표 우선", key="apt_basis")
+        include_restricted = st.checkbox("시간제한·입주민 전용 포함", key="apt_restricted")
+    links = _links(bundle.apartments, stations, entrances, signature, st.session_state["entrance_revision"],
+                   "entrance_preferred" if basis_label == "보정 좌표 우선" else "center_only", include_restricted)
 
     linked = links[links.canonical_station_id.eq(station_id)].merge(bundle.apartments, on="kapt_code", validate="many_to_one")
     districts = sorted(linked.sigungu.dropna().astype(str).unique()) if "sigungu" in linked else []
@@ -183,7 +373,9 @@ def render_apartment_tab(*, root: Path, metrics: pd.DataFrame, coordinates: pd.D
         st.metric("단지 전체 세대수 합계", f"{filtered.drop_duplicates('kapt_code').households.sum():,.0f}세대", border=True)
         st.metric("평일 일평균 승하차", f"{selected_station.daily_ridership:,.0f}건", border=True)
         st.metric("선택 비교기간 증가율", "산출 불가" if pd.isna(growth) else f"{growth:+.1f}%", border=True)
-    st.caption("세대수 합계는 반경 안에 대표 좌표가 있는 단지 전체의 세대수이며, 실제 역 이용 가구 수가 아닙니다. 이용량 증가율은 TOP10 탭의 현재 비교기간 정의를 재사용합니다.")
+        st.metric("보행 출입구 기준", f"{filtered.coordinate_basis.eq('보행 출입구').sum():,}개", border=True)
+        st.metric("단지 중심 기준", f"{filtered.coordinate_basis.eq('단지 중심').sum():,}개", border=True)
+    st.caption("세대수 합계는 선택 거리 기준으로 반경 안에 있는 고유 단지의 세대수이며 실제 역 이용 가구 수가 아닙니다. 보정 좌표는 사용자가 확인한 단지 보행 출입구입니다. 거리는 역 대표점까지의 직선거리이며 실제 보행 경로·경사·횡단보도는 반영하지 않습니다.")
 
     selected_code = None
     if not filtered.empty:
@@ -196,7 +388,11 @@ def render_apartment_tab(*, root: Path, metrics: pd.DataFrame, coordinates: pd.D
         map_homes["marker_radius"] = 5 + np.sqrt(map_homes.households / scale_max) * 11
         map_homes["marker_color"] = map_homes.kapt_code.map(lambda x: [239, 68, 68, 220] if x == selected_code else [37, 99, 235, 190])
         map_homes["line_color"] = map_homes.kapt_code.map(lambda x: [127, 29, 29, 255] if x == selected_code else [255, 255, 255, 230])
-        map_homes["distance_display"] = map_homes.distance_m.map(lambda x: f"{x:,.1f}m")
+        map_homes["distance_display"] = map_homes.effective_distance_m.map(lambda x: f"{x:,.1f}m")
+        map_homes["center_latitude"] = map_homes.latitude
+        map_homes["center_longitude"] = map_homes.longitude
+        map_homes["latitude"] = map_homes.selected_latitude
+        map_homes["longitude"] = map_homes.selected_longitude
         map_homes["households_display"] = map_homes.households.map(lambda x: "정보 없음" if pd.isna(x) else f"{x:,.0f}세대")
         map_homes["approval_display"] = pd.to_datetime(map_homes.get("approval_date"), errors="coerce").dt.strftime("%Y-%m-%d").fillna("정보 없음")
         map_homes["parking_display"] = map_homes.get("parking_per_household", pd.Series(index=map_homes.index)).map(lambda x: "정보 없음" if pd.isna(x) else f"{x:.2f}대")
@@ -222,6 +418,11 @@ def render_apartment_tab(*, root: Path, metrics: pd.DataFrame, coordinates: pd.D
         layers.append(pdk.Layer("ScatterplotLayer", selected_home, id="selected-apartment", pickable=True, stroked=True,
                                 get_position="[longitude, latitude]", get_radius=19, radius_units="'pixels'",
                                 get_fill_color=[239, 68, 68, 235], get_line_color=[127, 29, 29, 255], line_width_min_pixels=4))
+        selected_center = selected_home.assign(latitude=selected_home.center_latitude, longitude=selected_home.center_longitude,
+                                               tooltip_title="원본 단지 중심", tooltip_detail="수정되지 않는 원본 중심 좌표")
+        layers.append(pdk.Layer("ScatterplotLayer", selected_center, id="selected-apartment-center", pickable=True, stroked=True,
+                                get_position="[longitude, latitude]", get_radius=9, radius_units="'pixels'",
+                                get_fill_color=[250, 204, 21, 255], get_line_color=[113, 63, 18, 255], line_width_min_pixels=2))
     # 마지막 레이어가 화면 최상단에 그려지므로 역은 아파트가 겹쳐도 가려지지 않는다.
     layers.extend([
         pdk.Layer("ScatterplotLayer", station_map, id="selected-station", pickable=True, stroked=True,
@@ -234,23 +435,24 @@ def render_apartment_tab(*, root: Path, metrics: pd.DataFrame, coordinates: pd.D
     st.pydeck_chart(pdk.Deck(map_style=None, initial_view_state=pdk.ViewState(
         latitude=float(selected_station.latitude), longitude=float(selected_station.longitude), zoom={300: 15.5, 500: 15, 800: 14.4, 1000: 14.1}[radius]),
         layers=layers, tooltip={"html": "<b>{complex_name}{tooltip_title}</b><br/>{tooltip_detail}<br/>거리: {distance_display}<br/>세대수: {households_display}<br/>사용승인일: {approval_display}<br/>세대당 주차: {parking_display}<br/>주소: {address_display}"}), height=560)
-    st.caption("초록색 마커·라벨은 선택 역, 파란색은 조건 충족 아파트, 빨간색 큰 마커는 선택 단지입니다. 반투명 영역은 WGS84 구면 거리로 생성한 실제 설정 반경입니다.")
+    st.caption("초록색 마커·라벨은 선택 역, 파란색은 조건 충족 아파트의 적용 좌표, 빨간색 큰 마커는 선택 단지의 적용 좌표, 노란색은 선택 단지의 수정 불가 원본 중심입니다. 반투명 영역은 WGS84 구면 거리로 생성한 설정 반경입니다.")
 
     if filtered.empty:
         st.info("해당 조건을 충족하는 단지가 없습니다.")
     else:
         sort_label = st.selectbox("목록 정렬", ["거리 가까운 순", "세대수 많은 순", "연식 낮은 순", "주차 많은 순"], key="apt_sort")
-        sort_spec = {"거리 가까운 순": ("distance_m", True), "세대수 많은 순": ("households", False),
+        sort_spec = {"거리 가까운 순": ("effective_distance_m", True), "세대수 많은 순": ("households", False),
                      "연식 낮은 순": ("apartment_age", True), "주차 많은 순": ("parking_per_household", False)}[sort_label]
         ordered = filtered.sort_values(sort_spec[0], ascending=sort_spec[1], na_position="last")
         display = _display_table(ordered)
         st.dataframe(display, hide_index=True, column_config={
-            "역까지 직선거리(m)": st.column_config.NumberColumn(format="%.1f"),
+            "적용 거리(m)": st.column_config.NumberColumn(format="%.1f"),
+            "중심점 거리(m)": st.column_config.NumberColumn(format="%.1f"),
             "세대수": st.column_config.NumberColumn(format="%,.0f"),
             "동수": st.column_config.NumberColumn(format="%,.0f"),
             "세대당 주차대수": st.column_config.NumberColumn(format="%.2f"),
         }, key="apartment_list")
-        metadata = {"station_id": station_id, "station": labels[station_id], "distance_basis": "대표 좌표 간 WGS84 직선거리",
+        metadata = {"station_id": station_id, "station": labels[station_id], "distance_basis": basis_label + " · WGS84 직선거리",
                     "radius_m": radius, "minimum_households": minimum_households, "districts": district_filter,
                     "dongs": dong_filter, "age_groups": age_filter}
         st.download_button("현재 목록 CSV", _csv_bytes(display, metadata), f"{station_id}_apartments.csv", "text/csv", key="apt_download")
@@ -267,6 +469,23 @@ def render_apartment_tab(*, root: Path, metrics: pd.DataFrame, coordinates: pd.D
             st.write("가까운 역: " + ", ".join(f"{r.station_name}({r.line_id}호선) {r.distance_m:,.1f}m" for _, r in nearest.iterrows()))
             st.write(f"현재 {radius:,}m 반경 내 접근 가능한 분석 역: {access_count}개")
             st.caption("가격·학군 자료는 표시하지 않습니다. 이후 가격 자료는 kapt_code를 키로 연결할 수 있습니다. 사용승인일은 실제 입주일과 다를 수 있습니다.")
+            all_gates = entrances[entrances.kapt_code.astype(str).eq(str(selected_code))].copy()
+            if all_gates.empty: st.info("등록된 출입구가 없습니다. 중심 좌표를 사용합니다.")
+            else:
+                all_gates["현재 계산 포함"] = all_gates.entrance_id.eq(chosen.selected_entrance_id)
+                st.dataframe(all_gates[["entrance_name", "entrance_type", "access_status", "verification_status", "enabled", "verified_at", "현재 계산 포함"]], hide_index=True)
+
+    center_in = linked.center_distance_m.le(float(radius))
+    effective_in = linked.effective_distance_m.le(float(radius))
+    changed = linked[center_in.ne(effective_in)].copy()
+    st.subheader("보정 적용 전후 포함 변화")
+    if changed.empty: st.info("현재 역·반경에서 새로 포함되거나 제외된 단지가 없습니다.")
+    else:
+        changed["변화"] = np.where(effective_in[changed.index], "새로 포함", "제외")
+        st.dataframe(changed[["complex_name", "kapt_code", "center_distance_m", "effective_distance_m", "selected_entrance_name", "selected_access_status", "변화"]], hide_index=True)
+
+    entrances = _render_entrance_editor(bundle.apartments, entrances, entrance_path, selected_station, int(radius),
+                                         float(config.get("entrance_far_warning_m", 1000)))
 
     with st.expander("선택 역 이용량 추이", expanded=False):
         trend = monthly[monthly.canonical_station_id.astype(str).eq(station_id)].copy()

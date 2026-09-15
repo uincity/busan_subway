@@ -1,6 +1,7 @@
 # 명시 경로는 환경변수 BUSAN_METRO_APARTMENT_PARQUET가 가장 우선합니다.
 source_path: data/interim/kapt_clean.parquet
 snapshot_path: data/processed/apartments/kapt_master.parquet
+entrance_far_warning_m: 1000
 
 # 역 ID는 config/station_coordinates.csv 및 공식 노선 순서를 따릅니다.
 segments:
