@@ -1,0 +1,21 @@
+# 명시 경로는 환경변수 BUSAN_METRO_APARTMENT_PARQUET가 가장 우선합니다.
+source_path: data/interim/kapt_clean.parquet
+snapshot_path: data/processed/apartments/kapt_master.parquet
+
+# 역 ID는 config/station_coordinates.csv 및 공식 노선 순서를 따릅니다.
+segments:
+  전체 역: []
+  1호선 동래·금정:
+    type: configured_station_names
+    note: 역 행정구역 마스터가 없어 검수 가능한 설정 목록으로 관리합니다.
+    stations: [동래(1호선), 명륜, 온천장, 부산대, 장전, 구서, 두실, 남산, 범어사, 노포]
+  2호선 장산–못골:
+    type: ordered_range
+    line_id: "2"
+    start: 장산
+    end: 못골
+    note: 역 코드의 공식 노선 순서로 양 끝 역을 포함합니다.
+  3호선 사직·아시아드 일대:
+    type: configured_station_names
+    note: 사용자 지정 관심 역 초기 제안입니다.
+    stations: [사직, 종합운동장]

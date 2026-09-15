@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 from src.metro.growth import ComparisonSpec, FORMULA_VERSION, add_streaks, compare_periods, completed_years, rank_changes
 from src.metro.pipeline import INTERIM, PROCESSED, REPORTS, run_all
 from src.metro.detail_ui import render_station_detail
+from src.metro.apartment_ui import render_apartment_tab
 
 st.set_page_config(page_title="부산 도시철도 역세권 수요", page_icon=":material/subway:", layout="wide")
 st.title("부산 도시철도 역세권 수요 탐색")
@@ -323,9 +324,7 @@ with tabs[3]:
     st.caption(f"{record_year - 1}~{record_year} 비교 가능 표본 {len(record)}개. 선택한 지표·순위 기준·TOP 개수를 적용했습니다.")
 
 with tabs[4]:
-    st.info("아파트 자료와 역 좌표가 확보되면 Haversine 직선거리 기준 연결을 제공할 수 있습니다. 현재는 임의 좌표를 생성하지 않습니다.")
-    template = pd.DataFrame(columns=["apartment_id", "apartment_name", "latitude", "longitude"])
-    st.download_button("입력 템플릿 다운로드", template.to_csv(index=False).encode("utf-8-sig"), "apartment_template.csv", "text/csv")
+    render_apartment_tab(root=ROOT, metrics=metrics, coordinates=coordinates, monthly=monthly, comparison=comparison)
 
 with tabs[5]:
     quality_labels = {"metric": "품질 항목", "value": "값"}
