@@ -5,3 +5,4 @@ __pycache__/
 pytest-cache-files-*/
 *.pyc
 data/**/*.csv
+!data/external/station_events.csv

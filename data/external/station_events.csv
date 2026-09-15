@@ -1,0 +1,3 @@
+event_id,station_id,event_type,title,announcement_date,actual_start_date,end_date,date_precision,event_status,latitude,longitude,distance_m,scale_value,scale_unit,source_url,source_title,publisher,source_published_date,checked_at,verification_status,expected_pattern,notes
+evt-121-20241121,121,기업·공공기관 이전,부산콘텐츠비즈타운 개소,,2024-11-21,,day,발생,,,,38,기업 입주실,https://www.busan.go.kr/news/snsbusan03/view?dataNo=70665&gugun=Prev,부산콘텐츠비즈타운 오픈,부산광역시,2024-12-02,2026-09-15,확인,업무·통학 수요 증가,공식 부산시보에서 개소일과 양정동 소재를 확인함. 좌표와 역 직선거리는 미확인.
+evt-099-20240926,099,아파트 입주,장림1 재개발 준공,,2024-09-26,,day,준공,,,,,,https://dynamice.busan.go.kr/home/BARA_0000000000176/main.do,장림1 재개발 추진경과,부산광역시 정비사업 통합홈페이지,,2026-09-15,일부 확인,주거 수요 증가,공식 추진경과에서 준공일만 확인. 실제 입주일은 미확인이므로 입주 발생 원인으로 확정하지 않음. 좌표와 역 직선거리 미확인.

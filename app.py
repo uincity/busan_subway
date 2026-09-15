@@ -12,7 +12,8 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 from src.metro.growth import ComparisonSpec, FORMULA_VERSION, add_streaks, compare_periods, completed_years, rank_changes
-from src.metro.pipeline import PROCESSED, REPORTS, run_all
+from src.metro.pipeline import INTERIM, PROCESSED, REPORTS, run_all
+from src.metro.detail_ui import render_station_detail
 
 st.set_page_config(page_title="부산 도시철도 역세권 수요", page_icon=":material/subway:", layout="wide")
 st.title("부산 도시철도 역세권 수요 탐색")
@@ -36,10 +37,10 @@ def csv_bytes(frame: pd.DataFrame, metadata: dict) -> bytes:
     return ("# " + json.dumps(metadata, ensure_ascii=False) + "\n" + frame.to_csv(index=False)).encode("utf-8-sig")
 
 
-def top_chart(frame: pd.DataFrame, value_col: str, color: str):
+def top_chart(frame: pd.DataFrame, value_col: str, color: str, key: str | None = None):
     if frame.empty:
         st.info("해당 부호의 후보 역이 없습니다.")
-        return
+        return None
     labels = frame.assign(chart_label=frame[value_col].map(lambda x: f"{x:+,.1f}"))
     bars = alt.Chart(labels).mark_bar(color=color).encode(
         x=alt.X(f"{value_col}:Q", title="증감률(%)" if value_col == "change_pct" else "증감 건수"),
@@ -49,7 +50,15 @@ def top_chart(frame: pd.DataFrame, value_col: str, color: str):
                  alt.Tooltip("change_pct:Q", title="증감률", format="+.1f")])
     text = alt.Chart(labels).mark_text(align="left", dx=4).encode(
         x=f"{value_col}:Q", y=alt.Y("station_name:N", sort=alt.SortField(value_col)), text="chart_label:N")
-    st.altair_chart((bars + text).properties(height=max(230, len(frame) * 30)))
+    chart = (bars + text).add_params(
+        alt.selection_point(name="station_pick", fields=["canonical_station_id"], on="click")
+    ).properties(height=max(230, len(frame) * 30))
+    if key is None:
+        st.altair_chart(chart)
+        return None
+    state = st.altair_chart(chart, key=key, on_select="rerun", selection_mode="station_pick")
+    picked = state.selection.get("station_pick", []) if state else []
+    return str(picked[-1]["canonical_station_id"]) if picked else None
 
 
 STATION_METRIC_LABELS = {
@@ -230,7 +239,7 @@ with tabs[3]:
     fcols = st.columns(4)
     with fcols[0]: selected_lines = st.multiselect("노선", sorted(comparison.line_id.dropna().astype(str).unique()), default=[])
     with fcols[1]: selected_types = st.multiselect("역 유형(최신 12개월 기준)", sorted(comparison.station_type.unique()), default=[])
-    with fcols[2]: min_base = st.number_input("최소 기준 이용량", min_value=0, value=0, step=100_000)
+    with fcols[2]: min_base = st.number_input("최소 기준 일평균 이용량", min_value=0, value=0, step=1_000)
     with fcols[3]: search = st.text_input("역명 검색")
     filtered = comparison.copy()
     if selected_lines: filtered = filtered[filtered.line_id.astype(str).isin(selected_lines)]
@@ -252,7 +261,10 @@ with tabs[3]:
         st.warning("코로나19 영향을 받은 연도 또는 2019년을 포함한 기저효과 비교입니다.")
     left, right = st.columns(2)
     with left:
-        st.subheader(f"뜨는 역 TOP{top_n}"); top_chart(rising, rank_col, "#2563EB")
+        st.subheader(f"뜨는 역 TOP{top_n}"); clicked_station = top_chart(rising, rank_col, "#2563EB", "rising_top_chart")
+        if clicked_station and clicked_station != st.session_state.get("rising_station_id"):
+            st.session_state["rising_station_id"] = clicked_station
+            st.rerun()
     with right:
         st.subheader(f"지는 역 TOP{top_n}"); top_chart(falling, rank_col, "#F97316")
     table_cols = ["rank", "station_name", "line_id", "station_type", "baseline_value", "target_value", "absolute_change", "change_pct",
@@ -278,6 +290,14 @@ with tabs[3]:
         st.download_button("뜨는 역 CSV", csv_bytes(rising, metadata), "rising_stations.csv", "text/csv")
         st.download_button("지는 역 CSV", csv_bytes(falling, metadata), "falling_stations.csv", "text/csv")
         st.download_button("비교제외 CSV", csv_bytes(excluded, metadata), "excluded_stations.csv", "text/csv")
+
+    render_station_detail(
+        rising=rising, comparison=comparison, raw_path=INTERIM / "ridership_long.parquet",
+        calendar_monthly=calendar_monthly, station_monthly=monthly, metrics=metrics,
+        baseline_year=baseline_year, target_year=target_year, metric_col=metric_col,
+        ytd_month=ytd_month, date_max=str(date_max),
+        event_path=ROOT / "data" / "external" / "station_events.csv",
+    )
 
     st.subheader("선택역 연간 추세")
     selected = st.multiselect("추세 비교 역(2~5개)", sorted(annual.station_name.unique()), default=rising.station_name.head(2).tolist(), key="annual_trend_stations")

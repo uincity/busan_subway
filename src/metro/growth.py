@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-FORMULA_VERSION = "annual-growth-v1"
+FORMULA_VERSION = "daily-average-growth-v2"
 
 
 @dataclass(frozen=True)
@@ -92,6 +92,9 @@ def compare_periods(annual: pd.DataFrame, monthly: pd.DataFrame, spec: Compariso
         "대상기간 결측", "신규역 또는 기준기간 결측", "기준기간 불완전", "대상기간 불완전", "기준값 0"], default="")
     excluded = joined[joined.exclusion_reason.ne("")].copy()
     result = joined[joined.exclusion_reason.eq("")].copy()
+    # 순위의 단위는 총합이 아니라 유효 관측일 기준 일평균이다. 결측일은 0으로 채우지 않는다.
+    result["baseline_value"] = result.baseline_value / result.baseline_days
+    result["target_value"] = result.target_value / result.target_days
     result["absolute_change"] = result.target_value - result.baseline_value
     result["change_pct"] = (result.target_value / result.baseline_value - 1) * 100
     years = spec.target_year - spec.baseline_year

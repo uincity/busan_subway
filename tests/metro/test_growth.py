@@ -21,9 +21,9 @@ def test_change_math_and_sign_ranking():
                         annual_rows({2024: 50, 2025: 50}, "103", "동일역")])
     result, excluded = compare_periods(annual, empty_monthly(), ComparisonSpec(2024, 2025))
     rows = result.set_index("canonical_station_id")
-    assert rows.loc["101", "absolute_change"] == 20
+    assert np.isclose(rows.loc["101", "absolute_change"], 20 / 365)
     assert np.isclose(rows.loc["101", "change_pct"], 20)
-    assert rows.loc["102", "absolute_change"] == -50
+    assert np.isclose(rows.loc["102", "absolute_change"], -50 / 365)
     assert np.isclose(rows.loc["102", "change_pct"], -25)
     rising, falling = rank_changes(result, top_n=10)
     assert rising.canonical_station_id.tolist() == ["101"]
@@ -71,5 +71,5 @@ def test_ytd_compares_exactly_same_month_range():
         "board": year + month, "alight": year + month, "total": 2 * (year + month), "observed_days": 30,
         "expected_days": 30, "is_complete": True} for year in (2025, 2026) for month in (1, 2, 3)])
     result, _ = compare_periods(annual_rows({2025: 999999, 2026: 999999}), monthly, ComparisonSpec(2025, 2026, "total", 2))
-    assert result.iloc[0].baseline_value == sum(2 * (2025 + m) for m in (1, 2))
-    assert result.iloc[0].target_value == sum(2 * (2026 + m) for m in (1, 2))
+    assert result.iloc[0].baseline_value == sum(2 * (2025 + m) for m in (1, 2)) / 60
+    assert result.iloc[0].target_value == sum(2 * (2026 + m) for m in (1, 2)) / 60
