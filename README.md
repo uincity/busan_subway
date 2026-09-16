@@ -94,7 +94,8 @@ python -m venv .venv
 기본 계산에는 활성화되고 사용자가 확인했으며, `보행 전용` 또는 `보행·차량 겸용`이고
 `상시 통행`인 출입구만 사용합니다. 화면 옵션으로 시간제한·입주민 전용 출입구를 포함할 수
 있습니다. 차량 전용·폐쇄·미확인 출입구는 제외되며 유효 출입구가 없는 단지는 중심 좌표로
-대체합니다. 표시 거리는 모두 역 대표점까지의 WGS84 직선거리이며 실제 보행거리가 아닙니다.
+대체합니다. WGS84 직선거리는 계산 후보 탐색에만 사용하며, 지도와 반경 판정에는 영속 저장된
+실제 보행 경로 거리만 사용합니다.
 
 보정 자료는 `data/corrections/apartment_entrances.csv`에 원자적으로 저장되고 저장 직전 버전은
 `apartment_entrances.csv.bak`에 보관됩니다. 파일 해시가 바뀌면 저장을 거부해 다른 세션의 변경을
@@ -120,8 +121,21 @@ $env:GRAPHHOPPER_API_KEY="발급받은 키"
 .venv\Scripts\python -m src.metro.precompute_routes --station-id 213 --include-restricted
 ```
 
+화면 자동 계산은 같은 환경변수 또는 Git에 커밋하지 않는 `.streamlit/secrets.toml`의
+`GRAPHHOPPER_API_KEY="발급받은 키"`를 사용할 수 있습니다.
+
 실패 항목을 다시 시도하려면 `--retry-failed`, 시험 실행 범위를 제한하려면 `--limit 10`을 추가합니다.
+특정 단지만 우선 재시도할 수도 있습니다.
+
+```powershell
+.venv\Scripts\python -m src.metro.precompute_routes --station-id 213 --include-restricted --retry-failed --kapt-code A10026094
+```
+
 기본 저장 위치는 `data/persistent/walking_routes.sqlite3`이며 프로세스 재시작 후에도 재사용됩니다.
 컨테이너나 임시 파일시스템에 배포할 때는 영속 볼륨을 연결한 뒤
 `BUSAN_METRO_ROUTE_DB`를 그 볼륨의 SQLite 경로로 반드시 지정해야 합니다. 로컬 프로젝트 디스크만으로
 배포 환경의 영속성을 보장하지 않습니다.
+
+GraphHopper의 요청 제한을 피하기 위해 기본 호출 간격은 1.1초이며 HTTP 429 응답은 대기 시간을
+늘리면서 최대 4회 재시도합니다. 필요하면 `GRAPHHOPPER_REQUEST_INTERVAL_S`와
+`GRAPHHOPPER_MAX_RETRIES` 환경변수로 조정할 수 있습니다.

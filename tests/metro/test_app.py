@@ -1,10 +1,12 @@
 from pathlib import Path
 import json
+import uuid
 
 from streamlit.testing.v1 import AppTest
 
 
-def test_dashboard_loads_without_exception():
+def test_dashboard_loads_without_exception(monkeypatch):
+    monkeypatch.setenv("BUSAN_METRO_ROUTE_DB", str(Path(".tmp") / f"app-routes-{uuid.uuid4().hex}.sqlite3"))
     path = Path(__file__).resolve().parents[2] / "app.py"
     app = AppTest.from_file(path, default_timeout=30).run()
     assert not app.exception

@@ -6,7 +6,8 @@ import pandas as pd
 from src.metro.apartments import validate_apartments
 from src.metro.entrances import ENTRANCE_COLUMNS, empty_entrances
 from src.metro.walking_routes import (
-    RouteConfig, best_results, build_candidates, calculate_pending, read_results,
+    RouteConfig, best_results, build_candidates, calculate_pending,
+    mark_apartments_stale, read_results,
 )
 
 
@@ -41,7 +42,7 @@ def test_restricted_conditions_are_separate_and_default_includes_gate():
 
 def test_persistent_reuse_stale_detection_and_failed_not_zero(monkeypatch):
     db = Path(".tmp") / f"routes-{uuid.uuid4().hex}.sqlite3"
-    config = RouteConfig(graphhopper_key="test")
+    config = RouteConfig(graphhopper_key="test", request_interval_s=0)
     candidates = build_candidates(_apartments(), _station(), _gate(), include_restricted=True)
     calls = []
     def fake_route(*args):
@@ -63,3 +64,26 @@ def test_persistent_reuse_stale_detection_and_failed_not_zero(monkeypatch):
     assert calculate_pending(db, changed, config)["실패"] == 1
     failed = read_results(db, changed, config).iloc[0]
     assert failed.result_status == "실패" and pd.isna(failed.distance_m)
+
+
+def test_correction_marks_only_related_routes_and_recalculates_once(monkeypatch):
+    db = Path(".tmp") / f"routes-{uuid.uuid4().hex}.sqlite3"
+    config = RouteConfig(graphhopper_key="test", request_interval_s=0)
+    first = build_candidates(_apartments(), _station(), _gate(access="상시 통행"), include_restricted=False)
+    raw2 = pd.DataFrame([{"kapt_code": "K2", "complex_name": "다른 단지", "latitude": 35.1362,
+                          "longitude": 129.0932, "households": 700}])
+    homes2 = validate_apartments(raw2, pd.DataFrame([_station()])).apartments
+    second = build_candidates(homes2, _station(), empty_entrances(), include_restricted=False)
+    candidates = pd.concat([first, second], ignore_index=True)
+    calls = []
+    monkeypatch.setattr("src.metro.walking_routes._graphhopper_route", lambda *args: (
+        calls.append(args) or (250.0, 180.0, [[129.092161, 35.135153], [129.093, 35.136]])
+    ))
+    assert calculate_pending(db, candidates, config)["완료"] == 2
+    assert mark_apartments_stale(db, {"K1"}, reason="correction") == 1
+    statuses = read_results(db, candidates, config).set_index("kapt_code").result_status.to_dict()
+    assert statuses == {"K1": "갱신 필요", "K2": "완료"}
+    only_changed = candidates[candidates.kapt_code.eq("K1")]
+    assert calculate_pending(db, only_changed, config)["완료"] == 1
+    assert calculate_pending(db, only_changed, config)["완료"] == 0
+    assert len(calls) == 3

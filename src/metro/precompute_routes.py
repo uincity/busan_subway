@@ -15,6 +15,7 @@ def main() -> None:
     parser.add_argument("--station-id", default="213", help="기본값: 대연역(2호선) ID 213")
     parser.add_argument("--include-restricted", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--retry-failed", action="store_true")
+    parser.add_argument("--kapt-code", action="append", help="지정 단지만 계산합니다. 여러 번 지정할 수 있습니다.")
     parser.add_argument("--limit", type=int)
     args = parser.parse_args()
     root = Path.cwd()
@@ -31,6 +32,10 @@ def main() -> None:
     apartments = validate_apartments(read_apartment_parquet(source), stations).apartments
     entrances, _ = read_entrances(root / "data/corrections/apartment_entrances.csv")
     candidates = build_candidates(apartments, match.iloc[0], entrances, include_restricted=args.include_restricted)
+    if args.kapt_code:
+        candidates = candidates[candidates.kapt_code.isin(set(args.kapt_code))].copy()
+        if candidates.empty:
+            raise SystemExit("지정한 kapt_code가 현재 역의 계산 후보에 없습니다.")
     config = RouteConfig.from_env()
     if not config.available:
         raise SystemExit("GRAPHHOPPER_API_KEY를 설정해야 합니다. 직선거리는 도보거리로 저장하지 않습니다.")

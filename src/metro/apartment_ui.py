@@ -25,7 +25,7 @@ from .entrances import (
 )
 from .walking_routes import (
     RouteConfig, best_results, build_candidates, calculate_pending,
-    persistent_db_path, read_results, status_counts,
+    mark_apartments_stale, persistent_db_path, read_results, status_counts,
 )
 
 
@@ -112,7 +112,8 @@ def _entrance_csv_bytes(frame: pd.DataFrame) -> bytes:
     return frame[ENTRANCE_COLUMNS].to_csv(index=False).encode("utf-8-sig")
 
 
-def _persist_entrances(frame: pd.DataFrame, path: Path) -> bool:
+def _persist_entrances(frame: pd.DataFrame, path: Path, route_db: Path,
+                       affected_codes: set[str], affected_entrance_ids: set[str]) -> bool:
     try:
         revision = save_entrances_atomic(frame, path, st.session_state.get("entrance_revision"))
     except (EntranceDataError, EntranceConflictError, OSError) as exc:
@@ -120,8 +121,15 @@ def _persist_entrances(frame: pd.DataFrame, path: Path) -> bool:
         return False
     st.session_state["entrance_revision"] = revision
     st.session_state["entrances"] = frame
+    stale_count = mark_apartments_stale(
+        route_db, affected_codes, reason=f"출입구 보정 변경 · revision {revision[:12]}",
+        entrance_ids=affected_entrance_ids,
+    )
+    st.session_state["route_refresh_queue"] = {
+        "revision": revision, "kapt_codes": sorted(affected_codes),
+    }
     _links.clear()
-    st.success("출입구 보정 파일에 저장했습니다. 이전 버전은 .bak 파일로 보관됩니다.")
+    st.success(f"출입구 보정을 저장하고 관련 경로 {stale_count:,}건을 갱신 대상으로 표시했습니다.")
     return True
 
 
@@ -153,7 +161,8 @@ def _render_edit_map(home: pd.Series, gates: pd.DataFrame, station: pd.Series, r
 
 
 def _render_entrance_editor(apartments: pd.DataFrame, entrances: pd.DataFrame, path: Path,
-                            station: pd.Series, radius: int, far_warning_m: float = 1000) -> pd.DataFrame:
+                            route_db: Path, station: pd.Series, radius: int,
+                            far_warning_m: float = 1000) -> pd.DataFrame:
     st.divider()
     st.subheader("출입구 보정")
     st.caption("전체 유효 단지를 단지명 또는 kapt_code로 검색합니다. 원본 중심 좌표는 변경하지 않습니다.")
@@ -236,7 +245,7 @@ def _render_entrance_editor(apartments: pd.DataFrame, entrances: pd.DataFrame, p
         st.caption("모든 거리는 역 대표 좌표까지의 WGS84 직선거리입니다. 단지 경계·실제 보행 경로를 검증한 결과가 아닙니다.")
         with st.container(horizontal=True):
             if st.button("저장", disabled=bool(check["errors"]), type="primary", key="entrance_save"):
-                if _persist_entrances(candidate_frame, path):
+                if _persist_entrances(candidate_frame, path, route_db, {str(code)}, {str(candidate["entrance_id"])}):
                     st.session_state.pop("entrance_preview", None); st.rerun()
             if st.button("취소", key="entrance_cancel"):
                 st.session_state.pop("entrance_preview", None); st.rerun()
@@ -244,7 +253,7 @@ def _render_entrance_editor(apartments: pd.DataFrame, entrances: pd.DataFrame, p
         confirm = st.checkbox("삭제 확인: 이 출입구를 삭제합니다", key="entrance_delete_confirm")
         if st.button("출입구 삭제", disabled=not confirm, key="entrance_delete", icon=":material/delete:"):
             updated = entrances[~entrances.entrance_id.eq(existing.entrance_id)].copy()
-            if _persist_entrances(updated, path): st.rerun()
+            if _persist_entrances(updated, path, route_db, {str(code)}, {str(existing.entrance_id)}): st.rerun()
 
     st.markdown("#### 등록 출입구")
     if gates.empty: st.info("이 단지에 등록된 출입구가 없습니다.")
@@ -264,7 +273,9 @@ def _render_entrance_editor(apartments: pd.DataFrame, entrances: pd.DataFrame, p
             merged, changes = merge_import(entrances, incoming, action)
             st.dataframe(changes[["change", "entrance_id", "kapt_code", "entrance_name", "latitude", "longitude"]], hide_index=True)
             if st.button("미리보기 내용 가져오기", key="entrance_import_apply"):
-                if _persist_entrances(merged, path): st.rerun()
+                affected = set(changes.kapt_code.astype(str))
+                affected_ids = set(changes.entrance_id.astype(str))
+                if _persist_entrances(merged, path, route_db, affected, affected_ids): st.rerun()
         except EntranceDataError as exc: st.error(f"가져오기 검증 실패: {exc}")
     return st.session_state.get("entrances", entrances)
 
@@ -364,7 +375,11 @@ def render_apartment_tab(*, root: Path, metrics: pd.DataFrame, coordinates: pd.D
         include_restricted = st.checkbox("시간제한·입주민 전용 포함", key="apt_restricted")
     st.caption("포함 시 사용자 확인된 시간제한·입주민 전용 보행 출입구도 후보가 됩니다. 실제 통행 가능 시간과 입주민 자격을 확인해야 합니다.")
 
-    route_config = RouteConfig.from_env()
+    try:
+        secret_route_key = str(st.secrets.get("GRAPHHOPPER_API_KEY", ""))
+    except (FileNotFoundError, KeyError):
+        secret_route_key = ""
+    route_config = RouteConfig.from_env(graphhopper_key=secret_route_key or None)
     route_db = persistent_db_path(root)
     st.caption(f"경로 저장 위치: {route_db}")
     if not os.getenv("BUSAN_METRO_ROUTE_DB", "").strip():
@@ -375,8 +390,37 @@ def render_apartment_tab(*, root: Path, metrics: pd.DataFrame, coordinates: pd.D
         mode="entrance_preferred" if basis_label == "보정 좌표 우선" else "center_only",
         candidate_radius_m=1600,
     )
+    household_map = bundle.apartments.set_index(bundle.apartments.kapt_code.astype(str)).households
+    needed_candidates = candidates_for_route[
+        candidates_for_route.candidate_distance_m.le(float(radius))
+        & candidates_for_route.kapt_code.map(household_map).ge(minimum_households)
+    ].copy()
     route_results = read_results(route_db, candidates_for_route, route_config)
-    route_counts = status_counts(route_results)
+    needed_results = read_results(route_db, needed_candidates, route_config)
+    route_counts = status_counts(needed_results)
+
+    # 일반 조회와 보정 저장 직후 모두 현재 화면에 필요한 누락/갱신 결과만 한 번 계산한다.
+    auto_pending = needed_results[needed_results.result_status.isin(["미계산", "갱신 필요"])]
+    refresh_job = st.session_state.get("route_refresh_queue")
+    if refresh_job:
+        changed = set(refresh_job.get("kapt_codes", []))
+        current_changed = auto_pending[auto_pending.kapt_code.astype(str).isin(changed)]
+        auto_pending = current_changed
+        st.session_state.pop("route_refresh_queue", None)
+    if route_config.available and not auto_pending.empty:
+        st.info(f"현재 조회에 필요한 경로 {len(auto_pending):,}건을 자동 갱신합니다. 출입구 보정 내용은 이미 저장되었습니다.")
+        bar = st.progress(0, text="보행 경로 자동 계산 준비 중")
+        def update_auto_progress(done, total, counts):
+            bar.progress(done / max(total, 1), text=f"자동 계산 {done}/{total} · 완료 {counts['완료']} · 실패 {counts['실패']}")
+        auto_counts = calculate_pending(
+            route_db, auto_pending[candidates_for_route.columns], route_config,
+            progress=update_auto_progress,
+        )
+        st.session_state["route_last_calculation"] = auto_counts
+        st.rerun()
+    elif refresh_job and not route_config.available:
+        st.warning("출입구 보정은 저장되었지만 API 키가 없어 경로 계산은 갱신 대기 상태입니다. 키 설정 후 화면 버튼으로 계산할 수 있습니다.")
+
     prepared = best_results(route_results)
     if prepared.empty:
         linked = bundle.apartments.iloc[0:0].copy()
@@ -393,12 +437,20 @@ def render_apartment_tab(*, root: Path, metrics: pd.DataFrame, coordinates: pd.D
         route_view["coordinate_basis"] = np.where(route_view.selected_entrance_id.eq("center"), "단지 중심", "보행 출입구")
         route_view["selected_entrance_name"] = route_view.selected_entrance_id.map(
             entrances.set_index("entrance_id").entrance_name.to_dict()).fillna("단지 중심")
+        route_view["selected_verified_at"] = route_view.selected_entrance_id.map(
+            entrances.set_index("entrance_id").verified_at.to_dict())
         center_map = candidates_for_route.drop_duplicates("kapt_code").set_index("kapt_code").center_distance_m
         route_view["center_distance_m"] = route_view.kapt_code.map(center_map)
         linked = route_view.merge(bundle.apartments, on="kapt_code", validate="one_to_one", suffixes=("", "_home"))
 
     status_text = " · ".join(f"{name} {count:,}건" for name, count in route_counts.items()) or "후보 없음"
     st.info(f"영속 경로 저장소: {status_text}")
+    last_calculation = st.session_state.pop("route_last_calculation", None)
+    if last_calculation:
+        if last_calculation.get("실패"):
+            st.warning(f"자동 계산 완료 {last_calculation['완료']:,}건 · 실패 {last_calculation['실패']:,}건. 보정 내용은 보존되며 실패 항목만 재시도할 수 있습니다.")
+        else:
+            st.success(f"자동 경로 갱신 완료: {last_calculation['완료']:,}건")
     action_cols = st.columns(2)
     with action_cols[0]:
         calculate_clicked = st.button("현재 역 미계산·갱신 필요 경로 계산", type="primary",
@@ -407,12 +459,12 @@ def render_apartment_tab(*, root: Path, metrics: pd.DataFrame, coordinates: pd.D
         retry_clicked = st.button("실패 경로 재시도", disabled=not route_config.available,
                                   key="retry_routes")
     if not route_config.available:
-        st.caption("경로 계산은 GRAPHHOPPER_API_KEY 설정 후 사용할 수 있습니다. 저장된 결과 조회에는 API 키가 필요하지 않습니다.")
+        st.caption("경로 계산은 환경변수 또는 Streamlit Secrets에 GRAPHHOPPER_API_KEY 설정 후 사용할 수 있습니다. 저장 결과 조회에는 키가 필요하지 않습니다.")
     if calculate_clicked or retry_clicked:
         bar = st.progress(0, text="보행 경로 계산 준비 중")
         def update_progress(done, total, counts):
             bar.progress(done / max(total, 1), text=f"경로 계산 {done}/{total} · 완료 {counts['완료']} · 실패 {counts['실패']}")
-        counts = calculate_pending(route_db, candidates_for_route, route_config,
+        counts = calculate_pending(route_db, needed_candidates, route_config,
                                    retry_failed=retry_clicked, progress=update_progress)
         st.success(f"경로 계산 완료: {counts}")
         st.rerun()
@@ -549,7 +601,7 @@ def render_apartment_tab(*, root: Path, metrics: pd.DataFrame, coordinates: pd.D
 
     st.caption("미계산·실패·갱신 필요 결과는 정상 결과와 분리되며 지도와 거리 조건 집계에 포함되지 않습니다.")
 
-    entrances = _render_entrance_editor(bundle.apartments, entrances, entrance_path, selected_station, int(radius),
+    entrances = _render_entrance_editor(bundle.apartments, entrances, entrance_path, route_db, selected_station, int(radius),
                                          float(config.get("entrance_far_warning_m", 1000)))
 
     with st.expander("선택 역 이용량 추이", expanded=False):

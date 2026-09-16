@@ -7,6 +7,7 @@ import sqlite3
 import time
 import urllib.parse
 import urllib.request
+from urllib.error import HTTPError
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,15 +33,19 @@ class RouteConfig:
     version: str = CALCULATION_VERSION
     graphhopper_url: str = "https://graphhopper.com/api/1/route"
     graphhopper_key: str = ""
+    request_interval_s: float = 1.1
+    max_retries: int = 4
 
     @classmethod
-    def from_env(cls) -> "RouteConfig":
+    def from_env(cls, *, graphhopper_key: str | None = None) -> "RouteConfig":
         return cls(
             provider=os.getenv("BUSAN_METRO_ROUTE_PROVIDER", DEFAULT_PROVIDER).strip().lower(),
             method=os.getenv("BUSAN_METRO_ROUTE_METHOD", "foot").strip(),
             version=os.getenv("BUSAN_METRO_ROUTE_VERSION", CALCULATION_VERSION).strip(),
             graphhopper_url=os.getenv("GRAPHHOPPER_URL", "https://graphhopper.com/api/1/route").strip(),
-            graphhopper_key=os.getenv("GRAPHHOPPER_API_KEY", "").strip(),
+            graphhopper_key=(graphhopper_key or os.getenv("GRAPHHOPPER_API_KEY", "")).strip(),
+            request_interval_s=max(0.0, float(os.getenv("GRAPHHOPPER_REQUEST_INTERVAL_S", "1.1"))),
+            max_retries=max(0, int(os.getenv("GRAPHHOPPER_MAX_RETRIES", "4"))),
         )
 
     @property
@@ -78,6 +83,31 @@ def connect(path: Path) -> sqlite3.Connection:
         """
     )
     return db
+
+
+def mark_apartments_stale(db_path: Path, kapt_codes: set[str] | list[str], *, reason: str,
+                          entrance_ids: set[str] | list[str] | None = None) -> int:
+    """Invalidate only stored routes related to changed apartment entrances."""
+    codes = sorted({str(code) for code in kapt_codes if str(code)})
+    if not codes:
+        return 0
+    entrances = sorted({str(value) for value in (entrance_ids or []) if str(value)})
+    with connect(db_path) as db:
+        marks = ",".join("?" for _ in codes)
+        entrance_clause = ""
+        params: list[object] = [reason[:1000], datetime.now(timezone.utc).isoformat(timespec="seconds"), *codes]
+        if entrances:
+            entrance_marks = ",".join("?" for _ in entrances)
+            entrance_clause = f" AND apartment_entrance_id IN ({entrance_marks})"
+            params.extend(entrances)
+        cursor = db.execute(
+            f"""UPDATE walking_routes
+                SET status='갱신 필요', error_message=?, updated_at=?
+                WHERE kapt_code IN ({marks}) AND status != '계산 중'{entrance_clause}""",
+            params,
+        )
+        db.commit()
+        return int(cursor.rowcount)
 
 
 def _stable_hash(payload: dict) -> str:
@@ -118,6 +148,10 @@ def build_candidates(apartments: pd.DataFrame, station: pd.Series, entrances: pd
                 "access_status": str(gate.access_status), "include_restricted": bool(include_restricted),
             }
             input_hash = _stable_hash(payload)
+            candidate_distance = float(haversine_m(
+                float(station.latitude), float(station.longitude),
+                float(gate.latitude), float(gate.longitude),
+            ))
             identity = {
                 "station_id": payload["station_id"], "line_id": payload["line_id"],
                 "station_entrance_id": payload["station_entrance_id"], "kapt_code": payload["kapt_code"],
@@ -125,13 +159,14 @@ def build_candidates(apartments: pd.DataFrame, station: pd.Series, entrances: pd
                 "include_restricted": payload["include_restricted"],
             }
             rows.append(payload | {"center_distance_m": float(home.center_distance_m),
+                                   "candidate_distance_m": candidate_distance,
                                    "input_hash": input_hash, "route_key": _stable_hash(identity)})
     return pd.DataFrame(rows)
 
 
 def read_results(db_path: Path, candidates: pd.DataFrame, config: RouteConfig) -> pd.DataFrame:
     if candidates.empty:
-        return candidates.assign(status=pd.Series(dtype=str))
+        return candidates.assign(status=pd.Series(dtype=str), result_status=pd.Series(dtype=str))
     with connect(db_path) as db:
         marks = ",".join("?" for _ in candidates.route_key)
         stored = pd.read_sql_query(
@@ -166,14 +201,25 @@ def _graphhopper_route(config: RouteConfig, start_lat: float, start_lon: float,
         "profile": config.method, "points_encoded": "false", "key": config.graphhopper_key,
     }, doseq=True)
     request = urllib.request.Request(f"{config.graphhopper_url}?{query}", headers={"User-Agent": "busan-metro/1"})
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            data = json.load(response)
-        path = data["paths"][0]
-        coords = path["points"]["coordinates"]
-        distance, duration = float(path["distance"]), float(path["time"]) / 1000
-    except Exception as exc:
-        raise RouteProviderError(str(exc)) from exc
+    for attempt in range(config.max_retries + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                data = json.load(response)
+            path = data["paths"][0]
+            coords = path["points"]["coordinates"]
+            distance, duration = float(path["distance"]), float(path["time"]) / 1000
+            break
+        except HTTPError as exc:
+            if exc.code != 429 or attempt >= config.max_retries:
+                raise RouteProviderError(str(exc)) from exc
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            try:
+                delay = float(retry_after)
+            except (TypeError, ValueError):
+                delay = min(30.0, 2.0 ** attempt)
+            time.sleep(max(delay, config.request_interval_s))
+        except Exception as exc:
+            raise RouteProviderError(str(exc)) from exc
     if distance <= 0 or duration <= 0 or len(coords) < 2:
         raise RouteProviderError("경로 제공자가 유효하지 않은 거리·시간·좌표를 반환했습니다.")
     return distance, duration, coords
@@ -184,7 +230,8 @@ def calculate_pending(db_path: Path, candidates: pd.DataFrame, config: RouteConf
                       progress=None) -> dict[str, int]:
     results = read_results(db_path, candidates, config)
     wanted = results.result_status.isin(["미계산", "갱신 필요"] + (["실패"] if retry_failed else []))
-    todo = results[wanted].copy()
+    # 가까운 단지를 먼저 준비하면 부분 성공 상태에서도 현재 지도에 유용한 결과가 먼저 보인다.
+    todo = results[wanted].sort_values("center_distance_m", kind="stable").copy()
     if limit is not None:
         todo = todo.head(limit)
     counts = {"완료": 0, "실패": 0, "건너뜀": int(len(results) - len(todo))}
@@ -222,7 +269,8 @@ def calculate_pending(db_path: Path, candidates: pd.DataFrame, config: RouteConf
             db.commit()
             if progress:
                 progress(index, len(todo), counts)
-            time.sleep(0.05)
+            if index < len(todo) and config.request_interval_s:
+                time.sleep(config.request_interval_s)
     return counts
 
 
