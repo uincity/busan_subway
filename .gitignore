@@ -8,3 +8,4 @@ data/**/*.csv
 !data/external/station_events.csv
 data/corrections/apartment_entrances.csv
 data/corrections/apartment_entrances.csv.bak
+data/persistent/*.sqlite3*

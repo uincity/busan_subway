@@ -109,3 +109,19 @@ python -m venv .venv
 ```powershell
 .venv\Scripts\python -m pytest -q -p no:cacheprovider tests\metro
 ```
+
+## 실제 보행 경로 사전 계산
+
+`아파트연결` 조회는 외부 API를 자동 호출하지 않고 SQLite에 저장된 실제 보행 경로만 읽습니다.
+GraphHopper 키를 환경변수로 설정한 뒤 기본 역인 대연역(역 ID `213`, 2호선)을 먼저 계산할 수 있습니다.
+
+```powershell
+$env:GRAPHHOPPER_API_KEY="발급받은 키"
+.venv\Scripts\python -m src.metro.precompute_routes --station-id 213 --include-restricted
+```
+
+실패 항목을 다시 시도하려면 `--retry-failed`, 시험 실행 범위를 제한하려면 `--limit 10`을 추가합니다.
+기본 저장 위치는 `data/persistent/walking_routes.sqlite3`이며 프로세스 재시작 후에도 재사용됩니다.
+컨테이너나 임시 파일시스템에 배포할 때는 영속 볼륨을 연결한 뒤
+`BUSAN_METRO_ROUTE_DB`를 그 볼륨의 SQLite 경로로 반드시 지정해야 합니다. 로컬 프로젝트 디스크만으로
+배포 환경의 영속성을 보장하지 않습니다.

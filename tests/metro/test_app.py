@@ -22,15 +22,23 @@ def test_dashboard_loads_without_exception():
     apartment_map = json.loads(app.get("deck_gl_json_chart")[1].proto.json)
     layer_ids = [layer["id"] for layer in apartment_map["layers"]]
     assert layer_ids[0] == "apartment-radius"
-    assert "selected-apartment" in layer_ids
-    # 기본 역은 조건 충족 단지가 1개라 선택 단지 레이어만 존재한다.
-    assert any(layer_id in layer_ids for layer_id in ["nearby-apartments", "selected-apartment"])
+    # 경로가 사전 계산되지 않은 환경에서는 직선거리를 도보거리로 대체하지 않는다.
+    assert "selected-apartment" not in layer_ids
     assert layer_ids[-2:] == ["selected-station", "selected-station-label"]
     assert apartment_map["layers"][0]["@@type"] == "GeoJsonLayer"
     assert apartment_map["layers"][-2]["@@type"] == "ScatterplotLayer"
     assert apartment_map["layers"][-1]["@@type"] == "TextLayer"
     assert apartment_map["layers"][-2]["radiusUnits"] == "pixels"
     assert apartment_map["layers"][-1]["sizeUnits"] == "pixels"
+    station_widget = next(widget for widget in app.selectbox if widget.label == "역")
+    assert station_widget.value == "213"
+    restricted_widget = next(widget for widget in app.checkbox if widget.label == "시간제한·입주민 전용 포함")
+    assert restricted_widget.value is True
+    station_widget.set_value("214")
+    restricted_widget.set_value(False)
+    app.run()
+    assert next(widget for widget in app.selectbox if widget.label == "역").value == "214"
+    assert next(widget for widget in app.checkbox if widget.label == "시간제한·입주민 전용 포함").value is False
 
     station_table = app.dataframe[0].value
     assert list(station_table.columns) == [
