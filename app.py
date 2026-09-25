@@ -16,7 +16,12 @@ from src.metro.pipeline import INTERIM, PROCESSED, REPORTS, run_all
 from src.metro.detail_ui import render_station_detail
 from src.metro.apartment_ui import render_apartment_tab
 
-st.set_page_config(page_title="부산 도시철도 역세권 수요", page_icon=":material/subway:", layout="wide")
+st.set_page_config(
+    page_title="부산 도시철도 역세권 수요",
+    page_icon=":material/subway:",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 st.title("부산 도시철도 역세권 수요 탐색")
 st.caption("승하차 건수의 규모·방향성과 연도별 변화를 탐색합니다. 승하차 합계는 고유 이용자 수가 아닌 연인원입니다.")
 
@@ -110,9 +115,31 @@ STATION_TYPE_HEX = {name: f"#{rgba[0]:02x}{rgba[1]:02x}{rgba[2]:02x}" for name, 
 
 metrics, monthly, annual, calendar_monthly, coordinates, quality_summary = load_data()
 date_min, date_max = quality_summary["date_min"], quality_summary["date_max"]
-tabs = st.tabs(["역세권 지표", "출퇴근 성격", "장기 변화", "뜨는 역 · 지는 역 TOP10", "아파트 연결", "데이터 상태"])
+# 왼쪽 사이드바: 제작자 링크 및 메뉴 신설
+with st.sidebar:
+    st.link_button(
+        "제작자: 열심남",
+        "https://uincity.github.io/",
+        icon=":material/open_in_new:",
+        use_container_width=True,
+    )
+    st.markdown("---")
+    st.subheader("메뉴")
+    menu = st.radio(
+        "메뉴 선택",
+        [
+            "역세권 지표",
+            "출퇴근 성격",
+            "장기 변화",
+            "뜨는 역 · 지는 역 TOP10",
+            "아파트 연결",
+            "데이터 상태",
+        ],
+        label_visibility="collapsed",
+        key="main_menu",
+    )
 
-with tabs[0]:
+if menu == "역세권 지표":
     with st.container(horizontal=True):
         st.metric("분석 역", f"{len(metrics):,}개", border=True)
         st.metric("최대 유효 평일", f"{metrics.valid_weekdays.max():,.0f}일", border=True)
@@ -150,7 +177,7 @@ with tabs[0]:
         },
     )
 
-with tabs[1]:
+elif menu == "출퇴근 성격":
     direction_view = metrics.rename(columns=STATION_METRIC_LABELS)
     mapped = metrics.merge(coordinates, on="canonical_station_id", how="left", validate="one_to_one")
     mapped = mapped.dropna(subset=["latitude", "longitude"]).copy()
@@ -196,14 +223,14 @@ with tabs[1]:
     st.caption("방향성 지수와 기존 유형 분류는 최신 12개월 평일 자료 기준입니다.")
     st.dataframe(direction_view.sort_values("주거 출발형 점수", ascending=False), hide_index=True)
 
-with tabs[2]:
+elif menu == "장기 변화":
     defaults = metrics.nlargest(3, "daily_ridership").station_name.tolist()
     names = st.multiselect("비교 역(2~5개 권장)", sorted(monthly.station_name.unique()), default=defaults)
     monthly_view = monthly[monthly.station_name.isin(names)].rename(columns={
         "month": "연월", "daily_ridership": "평일 일평균 승하차", "station_name": "역명"})
     st.line_chart(monthly_view, x="연월", y="평일 일평균 승하차", color="역명")
 
-with tabs[3]:
+elif menu == "뜨는 역 · 지는 역 TOP10":
     st.subheader("뜨는 역 · 지는 역 TOP10")
     complete = completed_years(annual)
     default_target = max(complete)
@@ -237,6 +264,7 @@ with tabs[3]:
     comparison = add_streaks(comparison, annual, metric_col, target_year)
     type_map = metrics.set_index("canonical_station_id")["station_type"]
     comparison["station_type"] = comparison.canonical_station_id.map(type_map).fillna("유형 미확인")
+    st.session_state["comparison"] = comparison
     fcols = st.columns(4)
     with fcols[0]: selected_lines = st.multiselect("노선", sorted(comparison.line_id.dropna().astype(str).unique()), default=[])
     with fcols[1]: selected_types = st.multiselect("역 유형(최신 12개월 기준)", sorted(comparison.station_type.unique()), default=[])
@@ -323,10 +351,16 @@ with tabs[3]:
     st.dataframe(record_table, hide_index=True)
     st.caption(f"{record_year - 1}~{record_year} 비교 가능 표본 {len(record)}개. 선택한 지표·순위 기준·TOP 개수를 적용했습니다.")
 
-with tabs[4]:
-    render_apartment_tab(root=ROOT, metrics=metrics, coordinates=coordinates, monthly=monthly, comparison=comparison)
+elif menu == "아파트 연결":
+    render_apartment_tab(
+        root=ROOT,
+        metrics=metrics,
+        coordinates=coordinates,
+        monthly=monthly,
+        comparison=st.session_state.get("comparison"),
+    )
 
-with tabs[5]:
+elif menu == "데이터 상태":
     quality_labels = {"metric": "품질 항목", "value": "값"}
     manifest_labels = {"source_file_id": "원본 파일 ID", "file_name": "파일명", "relative_path": "상대 경로",
         "sha256": "SHA-256", "bytes": "파일 크기(바이트)", "encoding": "문자 인코딩", "rows": "행 수",

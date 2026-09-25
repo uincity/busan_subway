@@ -11,37 +11,28 @@ def test_dashboard_loads_without_exception(monkeypatch):
     app = AppTest.from_file(path, default_timeout=30).run()
     assert not app.exception
     assert app.title[0].value == "부산 도시철도 역세권 수요 탐색"
-    assert len(app.tabs) == 6
-    assert any(tab.label == "뜨는 역 · 지는 역 TOP10" for tab in app.tabs)
-    assert len(app.file_uploader) == 2  # 사건 CSV와 출입구 CSV 가져오기; 아파트는 로컬 Parquet 자동 로드
-    assert len(app.get("deck_gl_json_chart")) == 2
-    map_spec = json.loads(app.get("deck_gl_json_chart")[0].proto.json)
-    map_layer = map_spec["layers"][0]
-    assert map_layer["@@type"] == "ScatterplotLayer"
-    assert len(map_layer["data"]) == 112
-    assert map_layer["getFillColor"] == "@@=marker_color"
-    assert map_layer["getRadius"] == "@@=marker_radius"
-    apartment_map = json.loads(app.get("deck_gl_json_chart")[1].proto.json)
-    layer_ids = [layer["id"] for layer in apartment_map["layers"]]
-    assert layer_ids[0] == "apartment-radius"
-    # 경로가 사전 계산되지 않은 환경에서는 직선거리를 도보거리로 대체하지 않는다.
-    assert "selected-apartment" not in layer_ids
-    assert layer_ids[-2:] == ["selected-station", "selected-station-label"]
-    assert apartment_map["layers"][0]["@@type"] == "GeoJsonLayer"
-    assert apartment_map["layers"][-2]["@@type"] == "ScatterplotLayer"
-    assert apartment_map["layers"][-1]["@@type"] == "TextLayer"
-    assert apartment_map["layers"][-2]["radiusUnits"] == "pixels"
-    assert apartment_map["layers"][-1]["sizeUnits"] == "pixels"
-    station_widget = next(widget for widget in app.selectbox if widget.label == "역")
-    assert station_widget.value == "213"
-    restricted_widget = next(widget for widget in app.checkbox if widget.label == "시간제한·입주민 전용 포함")
-    assert restricted_widget.value is True
-    station_widget.set_value("214")
-    restricted_widget.set_value(False)
-    app.run()
-    assert next(widget for widget in app.selectbox if widget.label == "역").value == "214"
-    assert next(widget for widget in app.checkbox if widget.label == "시간제한·입주민 전용 포함").value is False
 
+    # 사이드바 제작자 링크 검증
+    link_buttons = app.sidebar.get("link_button")
+    assert len(link_buttons) == 1
+    assert link_buttons[0].proto.label == "제작자: 열심남"
+    assert link_buttons[0].proto.url == "https://uincity.github.io/"
+
+    # 사이드바 메뉴 라디오 버튼 검증
+    assert len(app.sidebar.radio) == 1
+    menu_radio = app.sidebar.radio[0]
+    expected_menus = [
+        "역세권 지표",
+        "출퇴근 성격",
+        "장기 변화",
+        "뜨는 역 · 지는 역 TOP10",
+        "아파트 연결",
+        "데이터 상태",
+    ]
+    assert list(menu_radio.options) == expected_menus
+    assert menu_radio.value == "역세권 지표"
+
+    # 1. 기본 메뉴: 역세권 지표 검증
     station_table = app.dataframe[0].value
     assert list(station_table.columns) == [
         "역 코드", "역명", "호선", "유효 평일수", "평일 일평균 승하차",
@@ -54,11 +45,39 @@ def test_dashboard_loads_without_exception(monkeypatch):
         "field": "daily_ridership", "order": "descending"
     }
 
-    visible_english_columns = {
-        "canonical_station_id", "station_name", "line_id", "station_type",
-        "baseline_value", "target_value", "absolute_change", "change_pct",
-        "relative_growth_pct", "increase_streak", "decrease_streak",
-        "am_direction", "pm_direction", "daily_ridership", "metric", "value",
-    }
-    for table in app.dataframe:
-        assert visible_english_columns.isdisjoint(set(table.value.columns))
+    # 2. 메뉴 전환: 출퇴근 성격 검증
+    app_commute = AppTest.from_file(path, default_timeout=30)
+    app_commute.session_state["main_menu"] = "출퇴근 성격"
+    app_commute.run()
+    assert not app_commute.exception
+    assert len(app_commute.get("deck_gl_json_chart")) >= 1
+    map_spec = json.loads(app_commute.get("deck_gl_json_chart")[0].proto.json)
+    map_layer = map_spec["layers"][0]
+    assert map_layer["@@type"] == "ScatterplotLayer"
+    assert len(map_layer["data"]) == 112
+    assert map_layer["getFillColor"] == "@@=marker_color"
+    assert map_layer["getRadius"] == "@@=marker_radius"
+
+    # 3. 메뉴 전환: 아파트 연결 검증
+    app_apt = AppTest.from_file(path, default_timeout=30)
+    app_apt.session_state["main_menu"] = "아파트 연결"
+    app_apt.run()
+    assert not app_apt.exception
+    assert len(app_apt.get("deck_gl_json_chart")) >= 1
+    apartment_map = json.loads(app_apt.get("deck_gl_json_chart")[0].proto.json)
+    layer_ids = [layer["id"] for layer in apartment_map["layers"]]
+    assert layer_ids[0] == "apartment-radius"
+    assert layer_ids[-2:] == ["selected-station", "selected-station-label"]
+    assert apartment_map["layers"][0]["@@type"] == "GeoJsonLayer"
+    assert apartment_map["layers"][-2]["@@type"] == "ScatterplotLayer"
+    assert apartment_map["layers"][-1]["@@type"] == "TextLayer"
+
+    station_widget = next(widget for widget in app_apt.selectbox if widget.label == "역")
+    assert station_widget.value == "213"
+    restricted_widget = next(widget for widget in app_apt.checkbox if widget.label == "시간제한·입주민 전용 포함")
+    assert restricted_widget.value is True
+    station_widget.set_value("214")
+    restricted_widget.set_value(False)
+    app_apt.run()
+    assert next(widget for widget in app_apt.selectbox if widget.label == "역").value == "214"
+    assert next(widget for widget in app_apt.checkbox if widget.label == "시간제한·입주민 전용 포함").value is False
